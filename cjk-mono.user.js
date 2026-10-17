@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CJK/Mono 字体替换
 // @namespace    http://tampermonkey.net/
-// @version      3.10.8
+// @version      3.10.9
 // @description  高性能汉字/假名及等宽字体替换。支持按网站配置、Shadow DOM、动态内容及输入框实时替换。附带热键控制面板 (Ctrl+Shift+F)。
 // @match        *://*/*
 // @run-at       document-start
@@ -89,7 +89,7 @@
   };
 
   const FONT_CHOICES = {
-    cjk: ['KingHwaOldSong-GB', 'Ku Mincho'],
+    cjk: ['KingHwaOldSong-GB', 'Ku Mincho', 'Ku Mincho BIG5GB'],
     code: ['NewComputerModern Mono 10', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', 'Courier New'],
   };
 

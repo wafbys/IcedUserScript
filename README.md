@@ -6,7 +6,7 @@
 
 | 脚本 | 版本 | 说明 |
 |------|------|------|
-| [cjk-mono.user.js](./cjk-mono.user.js) | 3.10.8 | 全站汉字/假名与等宽代码字体替换 |
+| [cjk-mono.user.js](./cjk-mono.user.js) | 3.10.9 | 全站汉字/假名与等宽代码字体替换 |
 
 ---
 
@@ -57,7 +57,7 @@
 | CJK | `KingHwaOldSong-GB`（仅此精确名称，无变体别名） |
 | 代码 | `NewComputerModern Mono 10` |
 
-面板可选 CJK：`KingHwaOldSong-GB`、`Ku Mincho`。  
+面板可选 CJK：`KingHwaOldSong-GB`、`Ku Mincho`、`Ku Mincho BIG5GB`（本机补字版：Big5+GBK+JIS 缺字补全，字形来自京华老宋体-GB / 汇文明朝体）。  
 可选代码字体：`NewComputerModern Mono 10`、`Cascadia Code`、`Fira Code`、`JetBrains Mono`、`Courier New`。
 
 可在脚本内修改 `DEFAULT_CONFIG` / `FONT_CHOICES` 以增删选项。  
@@ -102,6 +102,7 @@
 
 | 版本 | 变更 |
 |------|------|
+| 3.10.9 | 面板 CJK 候选新增 `Ku Mincho BIG5GB`（本机补字字体，非回退逻辑变更） |
 | 3.10.8 | 贴吧 CSS/DOM 补丁完全恢复为 3.10.5（`#app *` + 计算值已含 CJKPatch 则跳过） |
 | 3.10.7 | 贴吧撤回 `body *` 字体覆盖（会让 DOM 补丁误判已打上、unicode-range 不生效）；改为 CSS 变量 + 文字节点 inline |
 | 3.10.6 | 贴吧覆盖改为 `:root` / `body.cos-tieba`（无 `#app`）；Grok 保护器改为 `.message-bubble` / `data-testid`；去掉误绑的 `x.ai` |
