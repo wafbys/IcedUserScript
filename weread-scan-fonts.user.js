@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微信读书扫描 + 字体
 // @namespace    https://weread.qq.com/
-// @version      1.9
+// @version      1.10
 // @description  正文截图 + 可呼出的字体设置
 // @author       Grok
 // @match        https://weread.qq.com/web/reader/*
@@ -201,10 +201,8 @@
 
   function getReaderContainer() {
     const precise = [
-      '.readerChapterContent_container',
       '.readerChapterContent',
       '.wr_readerChapterContent',
-      '[class*="readerChapterContent"]',
       '[class*="chapterContent"]',
       '[class*="readerChapter"]',
       '.content',
@@ -214,7 +212,7 @@
       const el = document.querySelector(sel);
       if (el) {
         const r = el.getBoundingClientRect();
-        if (r.width > 200 && r.height > 150) return el;
+        if (r.width > 300 && r.height > 200) return el;
       }
     }
     const canvases = [...document.querySelectorAll('canvas')];
@@ -245,15 +243,12 @@
   let saving = false;
   let capturing = false;
 
-  function getCaptureTarget() {
-    let target = getReaderContainer();
-    const frame = target.querySelector?.('iframe');
-    if (frame) {
-      try {
-        if (frame.contentDocument?.body) target = frame.contentDocument.body;
-      } catch (e) {}
-    }
-    return target;
+  function getCaptureTargets() {
+    const targets = [getReaderContainer()];
+    const canvas = document.querySelector('canvas');
+    if (canvas?.parentElement) targets.push(canvas.parentElement);
+    if (document.body) targets.push(document.body);
+    return targets.filter((target, index) => target && targets.indexOf(target) === index);
   }
 
   function hashString(text) {
@@ -280,17 +275,33 @@
     return 'p:' + hashString(`${location.pathname}|${label}|${scroll}`);
   }
 
-  async function captureToDataURL(target = getCaptureTarget()) {
+  async function captureToDataURL() {
     const scale = Math.max(2, Math.min(3, window.devicePixelRatio || 1));
-    const canvas = await html2canvas(target, {
-      scale,
-      useCORS: true,
-      allowTaint: true,
-      backgroundColor: '#ffffff',
-      logging: false,
-      ignoreElements: (el) => el === host
-    });
-    return canvas.toDataURL('image/png');
+    let lastError = null;
+    for (const target of getCaptureTargets()) {
+      try {
+        const canvas = await html2canvas(target, {
+          scale,
+          useCORS: true,
+          allowTaint: true,
+          backgroundColor: '#ffffff',
+          logging: false,
+          ignoreElements: (el) => el === host
+        });
+        if (canvas.width < 20 || canvas.height < 20) {
+          throw new Error('截图尺寸为空');
+        }
+        const dataURL = canvas.toDataURL('image/png');
+        if (typeof dataURL === 'string' && dataURL.startsWith('data:image/') && dataURL.length > 100) {
+          return { dataURL, target };
+        }
+        lastError = new Error(`截图数据无效（${String(dataURL).slice(0, 24)}…）`);
+      } catch (e) {
+        lastError = e;
+        console.warn('[weread] 截图目标失败', target, e);
+      }
+    }
+    throw lastError || new Error('截图生成失败');
   }
 
   let toastTimer = null;
@@ -330,12 +341,9 @@
     let previousTime = null;
     try {
       await new Promise(resolve => requestAnimationFrame(() => resolve()));
-      const target = getCaptureTarget();
-      const identity = getPageIdentity(target);
-      const dataURL = await captureToDataURL(target);
-      if (typeof dataURL !== 'string' || !dataURL.startsWith('data:image/')) {
-        throw new Error('截图数据无效');
-      }
+      const captured = await captureToDataURL();
+      const dataURL = captured.dataURL;
+      const identity = getPageIdentity(captured.target);
       page = pages.find(p => p.identity === identity) || null;
       if (page) {
         previousData = page.dataURL;
