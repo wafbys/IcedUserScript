@@ -436,7 +436,7 @@
           <select id="mono-font"></select>
         </div>
         <div class="force-row">
-          <div style="margin-bottom:4px;font-size:12px;">英文策略</div>
+          <div style="margin-bottom:4px;font-size:12px;">字体应用策略</div>
           <select id="en-mode">
             <option value="book">书籍设定（只换中文）</option>
             <option value="rules">规则设定（标题 Sans / 正文 Serif / 代码 Mono）</option>
@@ -447,7 +447,7 @@
             <option value="serif">Serif</option>
             <option value="mono">Mono</option>
           </select>
-          <div style="margin-top:4px;font-size:11px;color:#999;">书籍设定：英文完全跟随原书；规则/强制：代码块始终 Mono</div>
+          <div id="strategy-hint" style="margin-top:4px;font-size:11px;color:#999;"></div>
         </div>
       </div>
     `;
@@ -519,18 +519,35 @@
 
     const enModeEl = shadow.getElementById('en-mode');
     const forceEl = shadow.getElementById('force-en');
+    const hintEl = shadow.getElementById('strategy-hint');
     enModeEl.value = fontSettings.enMode;
     forceEl.value = fontSettings.forceEn;
+    const updateStrategyHint = () => {
+      if (fontSettings.enMode === 'book') {
+        hintEl.textContent = '中文仍用面板字体；英文与代码完全跟随原书。';
+      } else if (fontSettings.enMode === 'rules') {
+        hintEl.textContent = '中文仍用面板字体；标题英文 Sans、正文英文 Serif、代码 Mono。';
+      } else {
+        const label = { sans: 'Sans', serif: 'Serif', mono: 'Mono' }[fontSettings.forceEn] || 'Serif';
+        hintEl.textContent = `中文仍用面板字体；非代码英文统一 ${label}，代码仍 Mono。`;
+      }
+    };
     const updateForceVisibility = () => {
       forceEl.style.display = fontSettings.enMode === 'force' ? '' : 'none';
     };
+    updateStrategyHint();
     updateForceVisibility();
     enModeEl.onchange = () => {
       fontSettings.enMode = enModeEl.value;
+      updateStrategyHint();
       updateForceVisibility();
       saveFontSettings();
     };
-    forceEl.onchange = () => { fontSettings.forceEn = forceEl.value; saveFontSettings(); };
+    forceEl.onchange = () => {
+      fontSettings.forceEn = forceEl.value;
+      updateStrategyHint();
+      saveFontSettings();
+    };
 
     // 扫描按钮
     shadow.getElementById('btnSave').onclick = saveCurrentPage;
