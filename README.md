@@ -6,7 +6,7 @@
 
 | 脚本 | 版本 | 说明 |
 |------|------|------|
-| [cjk-mono.user.js](./cjk-mono.user.js) | 3.10.9 | 全站汉字/假名与等宽代码字体替换 |
+| [cjk-mono.user.js](./cjk-mono.user.js) | 3.10.10 | 全站汉字/假名与等宽代码字体替换 |
 
 ---
 
@@ -29,7 +29,7 @@
 
 1. 安装 [Tampermonkey](https://www.tampermonkey.net/)（或兼容扩展）
 2. 打开 raw 链接，扩展会弹出安装确认：  
-   https://raw.githubusercontent.com/wafbys/cjk-mono-userscript/master/cjk-mono.user.js  
+   https://raw.githubusercontent.com/wafbys/IcedUserScript/master/cjk-mono.user.js  
    或把 `cjk-mono.user.js` 全文粘贴到「新建脚本」
 3. 确认本机已安装目标字体（默认 **KingHwaOldSong-GB**，family 名须完全一致）
 4. 刷新目标网页；需要时 `Ctrl+Shift+F` 打开面板调整
@@ -67,7 +67,7 @@
 
 1. 注入 `@font-face` 族名 `CJKPatch`，`src: local("你的字体名")`，并限定 `unicode-range` 覆盖汉字基本区、扩展 A–J、假名、兼容区、全角等（不含韩文 Hangul）
 2. 对含汉字/假名的节点写入 `font-family: "CJKPatch", … !important`；`unicode-range` 使西文仍走后面的原字体栈
-3. 仅在阅读站 allowlist 上覆盖该站已有的 CSS 字体变量（前置 `"CJKPatch"`，保留原 stack）。守卫用 `setProperty` 包装 + 观察 `html[style]` 属性，不注入页面 JS 上下文
+3. 仅在阅读站 allowlist 上覆盖该站已有的 CSS 字体变量（前置 `"CJKPatch"`，保留原 stack）。正文模块用 inline 前置兜底；守卫用 `setProperty` 包装 + 观察 `html[style]` 属性，不注入页面 JS 上下文
 4. `@font-face` 在 `document-start` 等 `<head>` 出现后注入；DOM 扫描仍等 `body` 之后再 idle 批处理。SPA 路由（`pushState` / `replaceState` / `popstate`）与短时守护轮询做二次注入；面板重新启用会重新挂上这些钩子
 
 ### 读通鉴等站点说明
@@ -79,7 +79,7 @@
 - 注释 / UI：`--font-family-modern`、`--font-family-ui`
 - 古本摘录：`--font-family-guben-excerpt-fixed`
 
-旧版只改部分 DOM 节点时，会出现「一部分中文换了字体、一部分没换」。3.10+ 在 allowlist 站点通过变量覆盖 + 正文选择器兜底缓解该问题。
+旧版只改部分 DOM 节点时，会出现「一部分中文换了字体、一部分没换」。3.10+ 在 allowlist 站点通过变量覆盖 + 正文节点内联兜底缓解该问题。
 
 **仍可能不变的情况：**
 
@@ -102,6 +102,7 @@
 
 | 版本 | 变更 |
 |------|------|
+| 3.10.10 | 阅读站正文兜底改为 inline 前置，移除 `font-family: "CJKPatch", inherit` 无效声明；更新链接指向 `IcedUserScript` 仓库 |
 | 3.10.9 | 面板 CJK 候选新增 `Ku Mincho BIG5GB`（本机补字字体，非回退逻辑变更） |
 | 3.10.8 | 贴吧 CSS/DOM 补丁完全恢复为 3.10.5（`#app *` + 计算值已含 CJKPatch 则跳过） |
 | 3.10.7 | 贴吧撤回 `body *` 字体覆盖（会让 DOM 补丁误判已打上、unicode-range 不生效）；改为 CSS 变量 + 文字节点 inline |

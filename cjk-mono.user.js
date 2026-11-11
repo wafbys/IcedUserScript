@@ -1,14 +1,14 @@
 // ==UserScript==
 // @name         CJK/Mono 字体替换
 // @namespace    http://tampermonkey.net/
-// @version      3.10.9
+// @version      3.10.10
 // @description  高性能汉字/假名及等宽字体替换。支持按网站配置、Shadow DOM、动态内容及输入框实时替换。附带热键控制面板 (Ctrl+Shift+F)。
 // @match        *://*/*
 // @run-at       document-start
 // @grant        GM_getValue
 // @grant        GM_setValue
-// @downloadURL  https://raw.githubusercontent.com/wafbys/cjk-mono-userscript/master/cjk-mono.user.js
-// @updateURL    https://raw.githubusercontent.com/wafbys/cjk-mono-userscript/master/cjk-mono.user.js
+// @downloadURL  https://raw.githubusercontent.com/wafbys/IcedUserScript/master/cjk-mono.user.js
+// @updateURL    https://raw.githubusercontent.com/wafbys/IcedUserScript/master/cjk-mono.user.js
 // ==/UserScript==
 
 (function () {
@@ -246,10 +246,8 @@
         ${varLines.join('\n        ')}
       }`;
       }
-      readingCss += `
-      ${READING_CONTENT_SELECTORS} {
-        font-family: "CJKPatch", inherit !important;
-      }`;
+      // 正文模块由 patchReadingContent() 做 inline 前置，不在这里写字体规则：
+      // CSS 字体列表不能混入 inherit（CSS-wide 关键字只能单独出现），否则整条声明被丢弃。
     }
 
     const css = `
@@ -375,6 +373,13 @@
       el.style.setProperty('font-family', `"CJKPatch", ${computedFamily}`, 'important');
       el.setAttribute(PATCH_ATTR, 'inlined');
     } catch (e) {}
+  }
+
+  // 阅读站正文模块的兜底：CSS 无法引用“当前计算值”，改用与文字节点一致的 inline 前置。
+  // 变量已含 CJKPatch 的元素会被 applyPatchToElement 自动跳过。
+  function patchReadingContent(doc = document) {
+    if (!isReadingSite() || !doc?.querySelectorAll) return;
+    doc.querySelectorAll(READING_CONTENT_SELECTORS).forEach(applyPatchToElement);
   }
 
   function processPendingNodes(doc) {
@@ -557,6 +562,7 @@
         setTimeout(() => {
           injectGlobalStyle(document);
           collectTextNodes(document.body);
+          patchReadingContent(document);
         }, 50);
       };
       window.addEventListener('popstate', rescanOnNav);
@@ -683,6 +689,7 @@
     const root = doc.body || (doc.nodeType === 11 ? doc : null);
     if (!root) return;
     collectTextNodes(root);
+    patchReadingContent(doc);
     observeMutations(doc);
     bindInputEvents(doc);
   }
