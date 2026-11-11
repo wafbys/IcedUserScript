@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微信读书扫描 + 字体
 // @namespace    https://weread.qq.com/
-// @version      1.7
+// @version      1.8
 // @description  正文截图 + 可呼出的字体设置
 // @author       Grok
 // @match        https://weread.qq.com/web/reader/*
@@ -253,7 +253,7 @@
         if (frame.contentDocument?.body) target = frame.contentDocument.body;
       } catch (e) {}
     }
-    const scale = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+    const scale = Math.max(2, Math.min(3, window.devicePixelRatio || 1));
     const canvas = await html2canvas(target, {
       scale,
       useCORS: true,
@@ -265,40 +265,82 @@
     return canvas.toDataURL('image/png');
   }
 
-  async function saveCurrentPage() {
+  let toastTimer = null;
+
+  function showToast(text, isError = false) {
+    if (!shadow) return;
+    const toast = shadow.getElementById('scan-toast');
+    const panel = shadow.querySelector('.panel');
+    if (toast) {
+      toast.textContent = text;
+      toast.classList.toggle('error', !!isError);
+      toast.classList.add('show');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toast.classList.remove('show'), 2200);
+    }
+    if (panel) {
+      panel.classList.add('flash');
+      setTimeout(() => panel.classList.remove('flash'), 450);
+    }
+  }
+
+  async function captureAndStore(overwrite = false) {
     if (saving) return;
     if (!db) {
-      alert('截图存储尚未就绪');
+      showToast('截图存储尚未就绪', true);
+      return;
+    }
+    if (overwrite && pages.length === 0) {
+      showToast('还没有截图', true);
       return;
     }
     saving = true;
     capturing = true;
     const saveBtn = shadow?.getElementById('btnSave');
+    const overwriteBtn = shadow?.getElementById('btnOverwrite');
     if (saveBtn) saveBtn.disabled = true;
+    if (overwriteBtn) overwriteBtn.disabled = true;
     updateScanStatus('截图中…');
+    showToast('截图中…');
+
+    let previousData = null;
+    let page = null;
     try {
       await new Promise(resolve => requestAnimationFrame(() => resolve()));
       const dataURL = await captureToDataURL();
-      let page;
-      if (pages.length === 0) {
-        page = { index: 1, dataURL, time: new Date().toISOString() };
-        pages.push(page);
-      } else {
+      if (overwrite) {
         page = pages[pages.length - 1];
+        previousData = page.dataURL;
         page.dataURL = dataURL;
         page.time = new Date().toISOString();
+      } else {
+        const nextIndex = pages.reduce((max, p) => Math.max(max, Number(p.index) || 0), 0) + 1;
+        page = { index: nextIndex, dataURL, time: new Date().toISOString() };
+        pages.push(page);
       }
       await savePageToDB(page);
+      updateScanStatus();
+      showToast(overwrite ? `已覆盖第 ${page.index} 页` : `已保存第 ${page.index} 页`);
     } catch (e) {
       console.error('保存失败', e);
-      alert('保存失败：' + (e.message || e));
+      if (page && !overwrite) {
+        const idx = pages.indexOf(page);
+        if (idx >= 0) pages.splice(idx, 1);
+      } else if (page && previousData != null) {
+        page.dataURL = previousData;
+      }
+      showToast('保存失败：' + (e.message || e), true);
     } finally {
       saving = false;
       capturing = false;
       if (saveBtn) saveBtn.disabled = false;
+      if (overwriteBtn) overwriteBtn.disabled = false;
       updateScanStatus();
     }
   }
+
+  function saveCurrentPage() { return captureAndStore(false); }
+  function overwriteLastPage() { return captureAndStore(true); }
 
   let fontObserver = null;
   let fontPatchTimer = null;
@@ -709,7 +751,11 @@
           font-size:12px;background:#fff;color:#333;
         }
         button.danger { background:#e8e6e3; }
+        .panel.flash { box-shadow:0 0 0 3px rgba(46,125,50,.5), 0 4px 16px rgba(0,0,0,.12); }
         .status { color:#666;font-size:11px;margin-bottom:6px;text-align:center; }
+        .toast { min-height:14px;margin-top:4px;font-size:11px;color:#2e7d32;text-align:center;opacity:0;transition:opacity .18s; }
+        .toast.show { opacity:1; }
+        .toast.error { color:#c62828; }
         .font-panel {
           display:none;position:absolute;top:0;right:130px;width:220px;
           background:#f7f6f3;border-radius:10px;box-shadow:0 4px 16px rgba(0,0,0,.12);padding:10px;
@@ -726,11 +772,15 @@
         <div class="header" id="scan-header">扫描</div>
         <div class="body">
           <div class="status" id="scan-status">0 页</div>
-          <button id="btnSave">保存</button>
+          <div style="display:flex;gap:4px;margin-bottom:5px;">
+            <button id="btnSave" style="flex:1;width:auto;margin-bottom:0;">保存</button>
+            <button id="btnOverwrite" title="覆盖最后一页" style="flex:0 0 46px;width:auto;margin-bottom:0;font-size:10px;">覆盖</button>
+          </div>
           <button id="btnCurrent">下载当前</button>
           <button id="btnZip">下载全部</button>
           <button id="btnFont">字体</button>
           <button class="danger" id="btnClear">清空</button>
+          <div class="toast" id="scan-toast"></div>
         </div>
       </div>
       <div class="font-panel" id="font-panel">
@@ -870,6 +920,7 @@
 
     // 扫描按钮
     shadow.getElementById('btnSave').onclick = saveCurrentPage;
+    shadow.getElementById('btnOverwrite').onclick = overwriteLastPage;
     shadow.getElementById('btnCurrent').onclick = downloadCurrentPage;
     shadow.getElementById('btnZip').onclick = downloadAllImages;
     shadow.getElementById('btnClear').onclick = async () => {
