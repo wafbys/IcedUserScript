@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微信读书扫描 + 字体
 // @namespace    https://weread.qq.com/
-// @version      1.3
+// @version      1.4
 // @description  正文截图 + 可呼出的字体设置
 // @author       Grok
 // @match        https://weread.qq.com/web/reader/*
@@ -251,14 +251,62 @@
     }`;
   }
 
-  function getFontStyle() {
-    let style = document.getElementById('weread-custom-fonts');
+  function getFontStyle(doc = document) {
+    let style = doc.getElementById('weread-custom-fonts');
     if (!style) {
-      style = document.createElement('style');
+      style = doc.createElement('style');
       style.id = 'weread-custom-fonts';
-      document.documentElement.appendChild(style);
+      (doc.head || doc.documentElement).appendChild(style);
     }
     return style;
+  }
+
+  function getComputedFamily(el) {
+    try {
+      const win = el.ownerDocument?.defaultView;
+      return win ? win.getComputedStyle(el).fontFamily : '';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  const boundFrames = new WeakSet();
+
+  function bindIframe(iframe) {
+    if (boundFrames.has(iframe)) return;
+    boundFrames.add(iframe);
+    iframe.addEventListener('load', () => {
+      setTimeout(() => {
+        try {
+          if (iframe.contentDocument) applyFonts();
+        } catch (e) {}
+      }, 0);
+    });
+  }
+
+  // 1.2 的全局 CSS 能覆盖正文，1.3 只看 getReaderContainer 会漏掉窄容器/iframe/shadow。
+  // 这里从整页出发，连同开着的 shadow root 和同源 iframe 一起扫。
+  function collectFontRoots(doc = document, out = [], seen = new Set()) {
+    if (!doc || seen.has(doc)) return out;
+    seen.add(doc);
+    const body = doc.body;
+    if (!body) return out;
+    out.push(body);
+    const walker = doc.createTreeWalker(body, NodeFilter.SHOW_ELEMENT);
+    let el;
+    while ((el = walker.nextNode())) {
+      if (el.shadowRoot && el !== host) out.push(el.shadowRoot);
+    }
+    doc.querySelectorAll('iframe').forEach(iframe => {
+      bindIframe(iframe);
+      try {
+        const idoc = iframe.contentDocument;
+        if (idoc?.body) {
+          collectFontRoots(idoc, out, seen);
+        }
+      } catch (e) {}
+    });
+    return out;
   }
 
   function splitFamilies(family) {
@@ -336,7 +384,7 @@
         : 'serif';
     }
     if (fontSettings.enMode === 'book') {
-      return bookFaceFor(el, getComputedStyle(el).fontFamily) || ruleRole(el);
+      return bookFaceFor(el, getComputedFamily(el)) || ruleRole(el);
     }
     return ruleRole(el);
   }
@@ -351,24 +399,20 @@
   }
 
   function undoFontPatches() {
-    document.querySelectorAll(`[${PATCH_ATTR}]`).forEach(el => {
-      try {
-        el.style.fontFamily = el.getAttribute(ORIG_ATTR) || '';
-      } catch (e) {}
-      el.removeAttribute(PATCH_ATTR);
-      el.removeAttribute(ORIG_ATTR);
+    collectFontRoots().forEach(root => {
+      root.querySelectorAll(`[${PATCH_ATTR}]`).forEach(el => {
+        try {
+          el.style.fontFamily = el.getAttribute(ORIG_ATTR) || '';
+        } catch (e) {}
+        el.removeAttribute(PATCH_ATTR);
+        el.removeAttribute(ORIG_ATTR);
+      });
     });
-  }
-
-  function getFontRoot() {
-    const el = getReaderContainer();
-    if (!el) return document.body;
-    return el.tagName === 'CANVAS' ? (el.parentElement || document.body) : el;
   }
 
   function patchFontElement(el) {
     if (!el || el.nodeType !== 1 || !el.style) return;
-    if (el.closest?.('button, [role="button"], input, textarea, select, nav, header, footer, [class*="toolbar"], [class*="menu"]')) return;
+    if (el.closest?.('script, style, noscript, template, button, [role="button"], input, textarea, select, nav, header, footer, [class*="toolbar"], [class*="menu"]')) return;
     const role = roleForElement(el);
     if (el.getAttribute(PATCH_ATTR) === role) return;
 
@@ -384,40 +428,46 @@
       el.style.fontFamily = el.getAttribute(ORIG_ATTR) || '';
     }
 
-    const computed = getComputedStyle(el).fontFamily;
+    const computed = getComputedFamily(el);
     el.style.setProperty('font-family', `${stack}, ${computed}`, 'important');
     el.setAttribute(PATCH_ATTR, role);
   }
 
   function patchReaderFonts() {
-    const root = getFontRoot();
-    if (!root?.querySelectorAll) return;
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-      acceptNode(node) {
-        return (node.nodeValue && TEXT_REGEX.test(node.nodeValue))
-          ? NodeFilter.FILTER_ACCEPT
-          : NodeFilter.FILTER_REJECT;
+    for (const root of collectFontRoots()) {
+      if (!root?.querySelectorAll) continue;
+      const doc = root.ownerDocument || document;
+      const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+        acceptNode(node) {
+          return (node.nodeValue && TEXT_REGEX.test(node.nodeValue))
+            ? NodeFilter.FILTER_ACCEPT
+            : NodeFilter.FILTER_REJECT;
+        }
+      });
+      let node;
+      while ((node = walker.nextNode())) {
+        patchFontElement(node.parentElement);
       }
-    });
-    let node;
-    while ((node = walker.nextNode())) {
-      patchFontElement(node.parentElement);
     }
   }
 
   function observeFontMutations() {
     fontObserver?.disconnect();
-    if (!document.body) return;
+    const roots = collectFontRoots();
+    if (!roots.length) return;
     fontObserver = new MutationObserver(() => {
       clearTimeout(fontPatchTimer);
       fontPatchTimer = setTimeout(patchReaderFonts, 200);
     });
-    fontObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
+    roots.forEach(root => {
+      try {
+        fontObserver.observe(root, { childList: true, subtree: true, characterData: true });
+      } catch (e) {}
+    });
   }
 
   function applyFonts() {
     undoFontPatches();
-    const style = getFontStyle();
     const faces = [];
     if (fontSettings.zh?.enabled && fontSettings.zh?.font) {
       faces.push(buildFace('WR-CJK', fontSettings.zh.font, CJK_RANGE));
@@ -428,7 +478,14 @@
         faces.push(buildFace(`WR-${key}`, item.font, LATIN_RANGE, LATIN_FALLBACKS[key]));
       }
     }
-    style.textContent = faces.join('\n');
+    const roots = collectFontRoots();
+    const docs = new Set([document]);
+    roots.forEach(root => {
+      if (root.ownerDocument) docs.add(root.ownerDocument);
+    });
+    docs.forEach(doc => {
+      if (doc.documentElement) getFontStyle(doc).textContent = faces.join('\n');
+    });
     patchReaderFonts();
     observeFontMutations();
   }
