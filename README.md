@@ -7,6 +7,7 @@
 | 脚本 | 版本 | 说明 |
 |------|------|------|
 | [cjk-mono.user.js](./cjk-mono.user.js) | 3.10.11 | 全站汉字/假名与等宽代码字体替换 |
+| [weread-scan-fonts.user.js](./weread-scan-fonts.user.js) | 1.2 | 微信读书正文截图 + 中英字体分离 |
 
 ---
 
@@ -119,6 +120,83 @@
 | 3.10.0 | 阅读站 CSS 变量覆盖、SPA 路由重扫、扩展 unicode-range、变量 setProperty 守卫 |
 | 3.9.0 | 按站点配置、黑名单、控制面板等基础能力 |
 
-### 许可证
+---
+
+## 微信读书扫描 + 字体
+
+`weread-scan-fonts.user.js` 在微信读书网页版阅读页提供正文截图和字体控制。字体部分把“英文用谁”拆成书籍设定、规则设定、强制设定三档，中文始终走独立的中文字体 face。
+
+### 功能
+
+- **正文截图**：`html2canvas` 截取当前阅读区域，PNG 存入 IndexedDB
+- **中英分离**：`@font-face` + `unicode-range` 拆分拉丁与汉字，不依赖站点是否给 `sans` / `serif` / `mono` 打标记
+- **动态内容**：MutationObserver 监听切章、追加段落
+- **不碰图标 / UI**：只给阅读区内含文字的元素加 inline `font-family`，保留原字体栈；图标 PUA 字符和阅读区外元素不处理
+
+### 英文策略（三档）
+
+| 策略 | 标题英文 | 正文英文 | 代码英文 | 适用 |
+|------|----------|----------|----------|------|
+| 书籍设定（只换中文） | 原书 | 原书 | 原书 | 书自己标了 Serif / Sans / Mono |
+| 规则设定 | Sans | Serif | Mono | 书没标英文，或中英混排不区分 |
+| 强制设定 | 选定的 Sans / Serif / Mono | 同左 | Mono | 书的英文标记不可信 |
+
+- 中文始终走 `WR-CJK`，不受英文策略影响。
+- 规则 / 强制模式下代码块始终 Mono；书籍设定下代码也跟随原书。
+- 规则模式下字体按角色注入：标题 → `WR-sans`，正文 → `WR-serif`，代码 → `WR-mono`，中文 → `WR-CJK`。
+
+### 安装
+
+1. 安装 [Tampermonkey](https://www.tampermonkey.net/)（或兼容扩展）
+2. 打开 raw 链接：`https://raw.githubusercontent.com/wafbys/IcedUserScript/master/weread-scan-fonts.user.js`
+3. 进入 `https://weread.qq.com/web/reader/...`，右上角出现扫描面板
+
+### 使用
+
+| 操作 | 说明 |
+|------|------|
+| 保存 | 截取当前阅读区域 |
+| 下载当前 | 下载最后一页 PNG |
+| 下载全部 | 逐页下载 PNG |
+| 字体 | 展开字体设置 |
+| 清空 | 清空 IndexedDB 中的截图 |
+
+配置存储：截图在 IndexedDB `weread_scan_db` / `pages`；字体在 `localStorage` 的 `weread_font_settings`。
+
+### 默认字体
+
+| 类型 | 默认值 |
+|------|--------|
+| 中文 | `KingHwaOldSong-GB` |
+| Sans | `Inter`（内部名 `Inter Variable Text`） |
+| Serif | `Stempel Garamond LT Std Subset` |
+| Mono | `NewComputerModern Mono 10` |
+
+面板里的显示名和字体内部名称不一定相同，脚本内置 `LOCAL_FONT_ALIASES` 做映射。
+
+### 已知问题
+
+- `saveCurrentPage()` 当前只覆盖最后一页，多页扫描尚未实现（下一步修）。
+- Canvas 渲染的书籍无法用 CSS 改字体。
+- 规则设定的标题只认 `h1`–`h6` / `[role="heading"]`；标题是普通 `div` 时请用“强制设定”。
+
+### 版本摘要
+
+| 版本 | 变更 |
+|------|------|
+| 1.2 | 英文策略三档、`unicode-range` 中英分离、`local()` 别名、动态内容观察 |
+| 1.1 | 初版：正文截图 + 字体设置 |
+
+### 权限与匹配
+
+```text
+@match        https://weread.qq.com/web/reader/*
+@grant        none
+@require      https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js
+```
+
+---
+
+## 许可证
 
 个人脚本，按需自用；字体版权归各字体作者所有。
