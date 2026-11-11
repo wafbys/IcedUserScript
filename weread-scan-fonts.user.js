@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微信读书扫描 + 字体
 // @namespace    https://weread.qq.com/
-// @version      1.10
+// @version      1.11
 // @description  正文截图 + 可呼出的字体设置
 // @author       Grok
 // @match        https://weread.qq.com/web/reader/*
@@ -260,14 +260,60 @@
     return (hash >>> 0).toString(36);
   }
 
-  function getPageIdentity(target) {
-    let text = '';
+  function canvasFingerprint(canvas) {
     try {
-      text = (target.innerText || target.textContent || '').replace(/\s+/g, ' ').trim();
+      const size = 48;
+      const small = document.createElement('canvas');
+      small.width = size;
+      small.height = size;
+      const ctx = small.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(canvas, 0, 0, size, size);
+      const data = ctx.getImageData(0, 0, size, size).data;
+      const lum = [];
+      let sum = 0;
+      let red = 0;
+      let green = 0;
+      let blue = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        red += data[i];
+        green += data[i + 1];
+        blue += data[i + 2];
+        const value = (data[i] * 299 + data[i + 1] * 587 + data[i + 2] * 114) / 1000;
+        lum.push(value);
+        sum += value;
+      }
+      const avg = sum / lum.length;
+      let bits = '';
+      for (const value of lum) bits += value > avg ? '1' : '0';
+      const pixels = lum.length || 1;
+      const color = `${Math.round(red / pixels)},${Math.round(green / pixels)},${Math.round(blue / pixels)}`;
+      return hashString(`${bits}|${color}`);
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function getPageIdentity(target, visual = '') {
+    const parts = [];
+    try {
+      parts.push(target.innerText || target.textContent || '');
     } catch (e) {}
-    if (text.length >= 20) {
+    try {
+      (target.ownerDocument || document).querySelectorAll('iframe').forEach(iframe => {
+        try {
+          const body = iframe.contentDocument?.body;
+          if (body) parts.push(body.innerText || body.textContent || '');
+        } catch (e) {}
+      });
+    } catch (e) {}
+    const text = parts.join(' ').replace(/\s+/g, ' ').trim();
+    if (text.length >= 120) {
       return 't:' + hashString(`${location.pathname}|${text}`);
     }
+    if (text.length >= 4) {
+      return 's:' + hashString(`${location.pathname}|${text}`) + ':' + visual;
+    }
+    if (visual) return 'v:' + visual;
     const label = document.querySelector(
       '[class*="pageNumber"], [class*="page-number"], [class*="chapterTitle"], [class*="chapter-title"]'
     )?.textContent || '';
@@ -293,7 +339,7 @@
         }
         const dataURL = canvas.toDataURL('image/png');
         if (typeof dataURL === 'string' && dataURL.startsWith('data:image/') && dataURL.length > 100) {
-          return { dataURL, target };
+          return { dataURL, target, visual: canvasFingerprint(canvas) };
         }
         lastError = new Error(`截图数据无效（${String(dataURL).slice(0, 24)}…）`);
       } catch (e) {
@@ -343,7 +389,7 @@
       await new Promise(resolve => requestAnimationFrame(() => resolve()));
       const captured = await captureToDataURL();
       const dataURL = captured.dataURL;
-      const identity = getPageIdentity(captured.target);
+      const identity = getPageIdentity(captured.target, captured.visual);
       page = pages.find(p => p.identity === identity) || null;
       if (page) {
         previousData = page.dataURL;
