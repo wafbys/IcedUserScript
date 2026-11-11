@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微信读书扫描 + 字体
 // @namespace    https://weread.qq.com/
-// @version      1.2
+// @version      1.3
 // @description  正文截图 + 可呼出的字体设置
 // @author       Grok
 // @match        https://weread.qq.com/web/reader/*
@@ -261,26 +261,93 @@
     return style;
   }
 
+  function splitFamilies(family) {
+    const s = String(family || '');
+    const out = [];
+    let current = '';
+    let quote = '';
+    for (const ch of s) {
+      if (quote) {
+        if (ch === quote) quote = '';
+        else current += ch;
+      } else if (ch === '"' || ch === "'") {
+        quote = ch;
+      } else if (ch === ',') {
+        if (current.trim()) out.push(current.trim());
+        current = '';
+      } else {
+        current += ch;
+      }
+    }
+    if (current.trim()) out.push(current.trim());
+    return out;
+  }
+
+  function stripCustomFaces(family) {
+    return splitFamilies(family)
+      .filter(name => !/^WR-(?:sans|serif|mono|CJK)$/i.test(name))
+      .join(', ');
+  }
+
+  function classifyFace(name) {
+    const n = String(name || '').trim().toLowerCase();
+    if (!n) return '';
+    if (['monospace', 'ui-monospace'].includes(n)) return 'mono';
+    if (['sans-serif', 'system-ui', 'ui-sans-serif'].includes(n)) return 'sans';
+    if (['serif', 'ui-serif'].includes(n)) return 'serif';
+    if (/mono|code|courier|consolas|menlo|monaco|cascadia|fira|jetbrains|inconsolata|hack/.test(n)) return 'mono';
+    if (/serif|garamond|times|georgia|stempel|officina|valkyrie|baskerville|caslon|sabon|minion|palatino|cambria|song|sung|simsun|mincho|ming|宋|明|楷|仿宋/.test(n)) return 'serif';
+    if (/sans|inter|arial|helvetica|segoe|roboto|lato|hei|yahei|pingfang|黑|gothic/.test(n)) return 'sans';
+    return '';
+  }
+
+  function faceFromFamily(family) {
+    for (const name of splitFamilies(stripCustomFaces(family))) {
+      const face = classifyFace(name);
+      if (face) return face;
+    }
+    return '';
+  }
+
+  function faceFromClass(el) {
+    for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
+      const tokens = String(node.className || '').toLowerCase().split(/\s+/).filter(Boolean);
+      if (tokens.some(token => token === 'mono' || token === 'font-mono' || token === 'code' || token.endsWith('-code') || token.startsWith('code-'))) return 'mono';
+      if (tokens.some(token => token === 'serif' || token === 'font-serif')) return 'serif';
+      if (tokens.some(token => token === 'sans' || token === 'font-sans' || token === 'sans-serif')) return 'sans';
+    }
+    return '';
+  }
+
+  function bookFaceFor(el, family) {
+    return faceFromClass(el) || faceFromFamily(family);
+  }
+
+  function ruleRole(el) {
+    if (el.closest?.(CODE_SELECTOR)) return 'mono';
+    if (el.closest?.(HEADING_SELECTOR)) return 'sans';
+    return 'serif';
+  }
+
+  function roleForElement(el) {
+    if (fontSettings.enMode === 'force') {
+      return ['sans', 'serif', 'mono'].includes(fontSettings.forceEn)
+        ? fontSettings.forceEn
+        : 'serif';
+    }
+    if (fontSettings.enMode === 'book') {
+      return bookFaceFor(el, getComputedStyle(el).fontFamily) || ruleRole(el);
+    }
+    return ruleRole(el);
+  }
+
   function enabledLatinFace(role) {
-    if (role === 'book') return '';
     const order = {
       sans: ['sans', 'serif', 'mono'],
       serif: ['serif', 'sans', 'mono'],
       mono: ['mono'],
     }[role] || ['serif', 'sans', 'mono'];
     return order.find(key => fontSettings[key]?.enabled && fontSettings[key]?.font) || '';
-  }
-
-  function roleForElement(el) {
-    if (fontSettings.enMode === 'book') return 'book';
-    if (el.closest?.(CODE_SELECTOR)) return 'mono';
-    if (fontSettings.enMode === 'force') {
-      return ['sans', 'serif', 'mono'].includes(fontSettings.forceEn)
-        ? fontSettings.forceEn
-        : 'serif';
-    }
-    if (el.closest?.(HEADING_SELECTOR)) return 'sans';
-    return 'serif';
   }
 
   function undoFontPatches() {
@@ -355,12 +422,10 @@
     if (fontSettings.zh?.enabled && fontSettings.zh?.font) {
       faces.push(buildFace('WR-CJK', fontSettings.zh.font, CJK_RANGE));
     }
-    if (fontSettings.enMode !== 'book') {
-      for (const key of ['sans', 'serif', 'mono']) {
-        const item = fontSettings[key];
-        if (item?.enabled && item?.font) {
-          faces.push(buildFace(`WR-${key}`, item.font, LATIN_RANGE, LATIN_FALLBACKS[key]));
-        }
+    for (const key of ['sans', 'serif', 'mono']) {
+      const item = fontSettings[key];
+      if (item?.enabled && item?.font) {
+        faces.push(buildFace(`WR-${key}`, item.font, LATIN_RANGE, LATIN_FALLBACKS[key]));
       }
     }
     style.textContent = faces.join('\n');
@@ -438,7 +503,7 @@
         <div class="force-row">
           <div style="margin-bottom:4px;font-size:12px;">字体应用策略</div>
           <select id="en-mode">
-            <option value="book">书籍设定（只换中文）</option>
+            <option value="book">书籍设定（按书中 face）</option>
             <option value="rules">规则设定（标题 Sans / 正文 Serif / 代码 Mono）</option>
             <option value="force">强制设定</option>
           </select>
@@ -524,12 +589,12 @@
     forceEl.value = fontSettings.forceEn;
     const updateStrategyHint = () => {
       if (fontSettings.enMode === 'book') {
-        hintEl.textContent = '中文仍用面板字体；英文与代码完全跟随原书。';
+        hintEl.textContent = '中文仍用面板字体；按书中 serif/sans/mono 标记套用面板对应字体，未标记时按规则。';
       } else if (fontSettings.enMode === 'rules') {
         hintEl.textContent = '中文仍用面板字体；标题英文 Sans、正文英文 Serif、代码 Mono。';
       } else {
         const label = { sans: 'Sans', serif: 'Serif', mono: 'Mono' }[fontSettings.forceEn] || 'Serif';
-        hintEl.textContent = `中文仍用面板字体；非代码英文统一 ${label}，代码仍 Mono。`;
+        hintEl.textContent = `中文仍用面板字体；英文（含代码）统一 ${label}。`;
       }
     };
     const updateForceVisibility = () => {
