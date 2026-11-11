@@ -7,7 +7,7 @@
 | 脚本 | 版本 | 说明 |
 |------|------|------|
 | [cjk-mono.user.js](./cjk-mono.user.js) | 3.10.11 | 全站汉字/假名与等宽代码字体替换 |
-| [weread-scan-fonts.user.js](./weread-scan-fonts.user.js) | 1.6 | 微信读书正文截图 + 中英字体分离 |
+| [weread-scan-fonts.user.js](./weread-scan-fonts.user.js) | 1.7 | 微信读书正文截图 + 中英字体分离 |
 
 ---
 
@@ -131,8 +131,8 @@
 - **正文截图**：`html2canvas` 截取当前阅读区域，PNG 存入 IndexedDB
 - **中英分离**：`@font-face` + `unicode-range` 拆分拉丁与汉字，不依赖站点是否给 `sans` / `serif` / `mono` 打标记
 - **动态内容**：MutationObserver 监听切章、追加段落
-- **不碰图标 / UI**：inline 补丁跳过按钮、导航、菜单和图标 PUA 字符；全局兜底也排除 button / input / svg / icon 类。补丁范围覆盖整页、同源 iframe 和 open shadow root，不再依赖阅读区宽度阈值
-- **全局兜底**：先打 inline 角色补丁，再套全局字体栈；英文 face 排在中文前面，避免英文落到中文字体的拉丁字形，中文仍由中文字体接住
+- **不碰图标 / UI**：补丁和兜底都收进阅读区根（含同源 iframe 与 open shadow root），只跳过按钮、输入框、SVG 和图标；observer 只监听 `childList`
+- **阅读区兜底**：先打 inline 角色补丁，再套阅读区字体栈；英文 face 排在中文前面，避免英文落到中文字体的拉丁字形，中文仍由中文字体接住
 
 ### 字体应用策略（三档）
 
@@ -157,7 +157,7 @@
 
 | 操作 | 说明 |
 |------|------|
-| 保存 | 截取当前阅读区域 |
+| 保存 | 截取当前阅读区，所见即所得（含替换后的字体） |
 | 下载当前 | 下载最后一页 PNG |
 | 下载全部 | 逐页下载 PNG |
 | 字体 | 展开字体设置 |
@@ -187,6 +187,7 @@
 
 | 版本 | 变更 |
 |------|------|
+| 1.7 | 字体补丁/兜底收进阅读区，observer 只监听 childList；保存防重入、目标缩到阅读区、倍率按 DPR、IndexedDB 超时与错误处理 |
 | 1.6 | 全局兜底英文 face 前置，避免英文落到中文字体拉丁字形；收窄 inline 跳过条件，正文不再因 menu/toolbar 祖先类被整段跳过 |
 | 1.5 | 加回全局字体覆盖兜底；inline 角色补丁先执行，兜底后执行，保证书籍设定仍读原书 face |
 | 1.4 | 补丁范围改为整页，覆盖同源 iframe 与 open shadow root；修复窄阅读区 / iframe 正文不生效 |

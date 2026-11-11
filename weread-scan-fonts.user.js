@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微信读书扫描 + 字体
 // @namespace    https://weread.qq.com/
-// @version      1.6
+// @version      1.7
 // @description  正文截图 + 可呼出的字体设置
 // @author       Grok
 // @match        https://weread.qq.com/web/reader/*
@@ -125,31 +125,70 @@
   function openDB() {
     return new Promise((resolve, reject) => {
       const req = indexedDB.open(DB_NAME, 1);
+      const timer = setTimeout(() => reject(new Error('IndexedDB 打开超时')), 10000);
       req.onupgradeneeded = e => {
         const database = e.target.result;
         if (!database.objectStoreNames.contains(STORE_NAME)) {
           database.createObjectStore(STORE_NAME, { keyPath: 'index' });
         }
       };
-      req.onsuccess = e => resolve(e.target.result);
-      req.onerror = e => reject(e);
+      req.onsuccess = e => {
+        clearTimeout(timer);
+        resolve(e.target.result);
+      };
+      req.onerror = e => {
+        clearTimeout(timer);
+        reject(e.target.error || new Error('IndexedDB 打开失败'));
+      };
+      req.onblocked = () => {
+        clearTimeout(timer);
+        reject(new Error('IndexedDB 被其它标签页占用'));
+      };
+    });
+  }
+
+  function waitTransaction(tx, label) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`${label}超时`)), 15000);
+      tx.oncomplete = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      tx.onerror = () => {
+        clearTimeout(timer);
+        reject(tx.error || new Error(`${label}失败`));
+      };
+      tx.onabort = () => {
+        clearTimeout(timer);
+        reject(tx.error || new Error(`${label}中止`));
+      };
     });
   }
 
   async function savePageToDB(page) {
     const tx = db.transaction(STORE_NAME, 'readwrite');
     tx.objectStore(STORE_NAME).put(page);
-    return new Promise(r => tx.oncomplete = r);
+    return waitTransaction(tx, 'IndexedDB 写入');
   }
 
   async function loadAllPages() {
     const tx = db.transaction(STORE_NAME, 'readonly');
-    return new Promise(resolve => {
-      const req = tx.objectStore(STORE_NAME).getAll();
+    const req = tx.objectStore(STORE_NAME).getAll();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('IndexedDB 读取超时')), 15000);
       req.onsuccess = () => {
+        clearTimeout(timer);
         const list = req.result || [];
         list.sort((a, b) => a.index - b.index);
         resolve(list);
+      };
+      req.onerror = () => {
+        clearTimeout(timer);
+        reject(req.error || new Error('IndexedDB 读取失败'));
+      };
+      tx.onabort = () => {
+        clearTimeout(timer);
+        reject(tx.error || new Error('IndexedDB 读取中止'));
       };
     });
   }
@@ -157,13 +196,15 @@
   async function clearDB() {
     const tx = db.transaction(STORE_NAME, 'readwrite');
     tx.objectStore(STORE_NAME).clear();
-    return new Promise(r => tx.oncomplete = r);
+    return waitTransaction(tx, 'IndexedDB 清空');
   }
 
   function getReaderContainer() {
     const precise = [
+      '.readerChapterContent_container',
       '.readerChapterContent',
       '.wr_readerChapterContent',
+      '[class*="readerChapterContent"]',
       '[class*="chapterContent"]',
       '[class*="readerChapter"]',
       '.content',
@@ -173,7 +214,7 @@
       const el = document.querySelector(sel);
       if (el) {
         const r = el.getBoundingClientRect();
-        if (r.width > 300 && r.height > 200) return el;
+        if (r.width > 200 && r.height > 150) return el;
       }
     }
     const canvases = [...document.querySelectorAll('canvas')];
@@ -201,9 +242,18 @@
     return document.querySelector('.wr_reader') || document.body;
   }
 
+  let saving = false;
+  let capturing = false;
+
   async function captureToDataURL() {
-    const target = getReaderContainer();
-    const scale = Math.max(2, window.devicePixelRatio || 1);
+    let target = getReaderContainer();
+    const frame = target.querySelector?.('iframe');
+    if (frame) {
+      try {
+        if (frame.contentDocument?.body) target = frame.contentDocument.body;
+      } catch (e) {}
+    }
+    const scale = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
     const canvas = await html2canvas(target, {
       scale,
       useCORS: true,
@@ -216,7 +266,18 @@
   }
 
   async function saveCurrentPage() {
+    if (saving) return;
+    if (!db) {
+      alert('截图存储尚未就绪');
+      return;
+    }
+    saving = true;
+    capturing = true;
+    const saveBtn = shadow?.getElementById('btnSave');
+    if (saveBtn) saveBtn.disabled = true;
+    updateScanStatus('截图中…');
     try {
+      await new Promise(resolve => requestAnimationFrame(() => resolve()));
       const dataURL = await captureToDataURL();
       let page;
       if (pages.length === 0) {
@@ -228,10 +289,14 @@
         page.time = new Date().toISOString();
       }
       await savePageToDB(page);
-      updateScanStatus();
     } catch (e) {
       console.error('保存失败', e);
       alert('保存失败：' + (e.message || e));
+    } finally {
+      saving = false;
+      capturing = false;
+      if (saveBtn) saveBtn.disabled = false;
+      updateScanStatus();
     }
   }
 
@@ -289,11 +354,12 @@
     const main = buildMainStack();
     if (!main) return '';
     const code = buildCodeStack();
+    const scope = '[data-weread-font-root]';
     return `
-    body, body *:not(script):not(style):not(noscript):not(template):not(svg):not(button):not(input):not(textarea):not(select):not([role="button"]):not([class*="icon"]):not([class*="Icon"]) {
+    ${scope}, ${scope} *:not(script):not(style):not(noscript):not(template):not(svg):not(button):not(input):not(textarea):not(select):not([role="button"]):not([class*="icon"]):not([class*="Icon"]) {
       font-family: ${main} !important;
     }
-    ${code ? `code, pre, kbd, samp { font-family: ${code} !important; }` : ''}`;
+    ${code ? `${scope} code, ${scope} pre, ${scope} kbd, ${scope} samp { font-family: ${code} !important; }` : ''}`;
   }
 
   function getFontStyle(doc = document) {
@@ -331,18 +397,37 @@
 
   // 1.2 的全局 CSS 能覆盖正文，1.3 只看 getReaderContainer 会漏掉窄容器/iframe/shadow。
   // 这里从整页出发，连同开着的 shadow root 和同源 iframe 一起扫。
+  const FONT_ROOT_SELECTORS = [
+    '.readerChapterContent_container',
+    '.readerChapterContent',
+    '.wr_readerChapterContent',
+    '[class*="readerChapterContent"]',
+    '[class*="chapterContent"]',
+    '[class*="readerChapter"]',
+    '.readerContent',
+  ];
+
+  function getFontRoot(doc = document) {
+    for (const sel of FONT_ROOT_SELECTORS) {
+      const el = doc.querySelector(sel);
+      if (el) return el;
+    }
+    return doc.body;
+  }
+
   function collectFontRoots(doc = document, out = [], seen = new Set()) {
     if (!doc || seen.has(doc)) return out;
     seen.add(doc);
-    const body = doc.body;
-    if (!body) return out;
-    out.push(body);
-    const walker = doc.createTreeWalker(body, NodeFilter.SHOW_ELEMENT);
+    const root = getFontRoot(doc);
+    if (!root) return out;
+    if (root.nodeType === 1) root.setAttribute('data-weread-font-root', '1');
+    out.push(root);
+    const walker = doc.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
     let el;
     while ((el = walker.nextNode())) {
       if (el.shadowRoot && el !== host) out.push(el.shadowRoot);
     }
-    doc.querySelectorAll('iframe').forEach(iframe => {
+    root.querySelectorAll('iframe').forEach(iframe => {
       bindIframe(iframe);
       try {
         const idoc = iframe.contentDocument;
@@ -518,7 +603,7 @@
             getFontStyle(doc).textContent = activeFaceCss + '\n' + activeFallbackCss;
           }
         });
-        const shadowCss = activeFallbackCss.replace('body, body *', ':host, :host *');
+        const shadowCss = activeFallbackCss.split('[data-weread-font-root]').join(':host');
         roots.filter(root => root.nodeType === 11).forEach(root => {
           let style = root.getElementById?.('weread-shadow-fonts');
           if (!style) {
@@ -537,12 +622,13 @@
     const roots = collectFontRoots();
     if (!roots.length) return;
     fontObserver = new MutationObserver(() => {
+      if (capturing) return;
       clearTimeout(fontPatchTimer);
-      fontPatchTimer = setTimeout(patchReaderFonts, 200);
+      fontPatchTimer = setTimeout(patchReaderFonts, 300);
     });
     roots.forEach(root => {
       try {
-        fontObserver.observe(root, { childList: true, subtree: true, characterData: true });
+        fontObserver.observe(root, { childList: true, subtree: true });
       } catch (e) {}
     });
   }
@@ -586,7 +672,7 @@
         getFontStyle(doc).textContent = faceCss + '\n' + fallbackCss;
       }
     });
-    const shadowCss = fallbackCss.replace('body, body *', ':host, :host *');
+    const shadowCss = fallbackCss.split('[data-weread-font-root]').join(':host');
     if (shadowCss) {
       roots.filter(root => root.nodeType === 11).forEach(root => {
         let style = root.getElementById?.('weread-shadow-fonts');
@@ -787,17 +873,23 @@
     shadow.getElementById('btnCurrent').onclick = downloadCurrentPage;
     shadow.getElementById('btnZip').onclick = downloadAllImages;
     shadow.getElementById('btnClear').onclick = async () => {
+      if (!db) return alert('截图存储尚未就绪');
       if (confirm('清空所有已保存页面？')) {
-        pages = [];
-        await clearDB();
-        updateScanStatus();
+        try {
+          pages = [];
+          await clearDB();
+          updateScanStatus();
+        } catch (e) {
+          console.error('清空失败', e);
+          alert('清空失败：' + (e.message || e));
+        }
       }
     };
   }
 
-  function updateScanStatus() {
+  function updateScanStatus(text) {
     const el = shadow?.getElementById('scan-status');
-    if (el) el.textContent = `${pages.length} 页`;
+    if (el) el.textContent = text || `${pages.length} 页`;
   }
 
   function pad4(n) { return String(n).padStart(4, '0'); }
@@ -826,11 +918,17 @@
   }
 
   async function init() {
-    db = await openDB();
-    pages = await loadAllPages();
     createPanel();
     updateScanStatus();
     applyFonts();
+    try {
+      db = await openDB();
+      pages = await loadAllPages();
+      updateScanStatus();
+    } catch (e) {
+      console.error('截图存储不可用', e);
+      updateScanStatus('存储不可用');
+    }
   }
 
   if (document.readyState === 'loading') {
