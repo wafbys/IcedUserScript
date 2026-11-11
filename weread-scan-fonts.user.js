@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微信读书扫描 + 字体
 // @namespace    https://weread.qq.com/
-// @version      1.8
+// @version      1.9
 // @description  正文截图 + 可呼出的字体设置
 // @author       Grok
 // @match        https://weread.qq.com/web/reader/*
@@ -245,7 +245,7 @@
   let saving = false;
   let capturing = false;
 
-  async function captureToDataURL() {
+  function getCaptureTarget() {
     let target = getReaderContainer();
     const frame = target.querySelector?.('iframe');
     if (frame) {
@@ -253,6 +253,34 @@
         if (frame.contentDocument?.body) target = frame.contentDocument.body;
       } catch (e) {}
     }
+    return target;
+  }
+
+  function hashString(text) {
+    let hash = 2166136261;
+    for (let i = 0; i < text.length; i++) {
+      hash ^= text.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(36);
+  }
+
+  function getPageIdentity(target) {
+    let text = '';
+    try {
+      text = (target.innerText || target.textContent || '').replace(/\s+/g, ' ').trim();
+    } catch (e) {}
+    if (text.length >= 20) {
+      return 't:' + hashString(`${location.pathname}|${text}`);
+    }
+    const label = document.querySelector(
+      '[class*="pageNumber"], [class*="page-number"], [class*="chapterTitle"], [class*="chapter-title"]'
+    )?.textContent || '';
+    const scroll = `${window.scrollX},${window.scrollY},${target.scrollTop || 0}`;
+    return 'p:' + hashString(`${location.pathname}|${label}|${scroll}`);
+  }
+
+  async function captureToDataURL(target = getCaptureTarget()) {
     const scale = Math.max(2, Math.min(3, window.devicePixelRatio || 1));
     const canvas = await html2canvas(target, {
       scale,
@@ -284,63 +312,63 @@
     }
   }
 
-  async function captureAndStore(overwrite = false) {
+  async function saveCurrentPage() {
     if (saving) return;
     if (!db) {
       showToast('截图存储尚未就绪', true);
       return;
     }
-    if (overwrite && pages.length === 0) {
-      showToast('还没有截图', true);
-      return;
-    }
     saving = true;
     capturing = true;
     const saveBtn = shadow?.getElementById('btnSave');
-    const overwriteBtn = shadow?.getElementById('btnOverwrite');
     if (saveBtn) saveBtn.disabled = true;
-    if (overwriteBtn) overwriteBtn.disabled = true;
     updateScanStatus('截图中…');
     showToast('截图中…');
 
-    let previousData = null;
     let page = null;
+    let previousData = null;
+    let previousTime = null;
     try {
       await new Promise(resolve => requestAnimationFrame(() => resolve()));
-      const dataURL = await captureToDataURL();
-      if (overwrite) {
-        page = pages[pages.length - 1];
+      const target = getCaptureTarget();
+      const identity = getPageIdentity(target);
+      const dataURL = await captureToDataURL(target);
+      if (typeof dataURL !== 'string' || !dataURL.startsWith('data:image/')) {
+        throw new Error('截图数据无效');
+      }
+      page = pages.find(p => p.identity === identity) || null;
+      if (page) {
         previousData = page.dataURL;
+        previousTime = page.time;
         page.dataURL = dataURL;
         page.time = new Date().toISOString();
       } else {
         const nextIndex = pages.reduce((max, p) => Math.max(max, Number(p.index) || 0), 0) + 1;
-        page = { index: nextIndex, dataURL, time: new Date().toISOString() };
+        page = { index: nextIndex, identity, dataURL, time: new Date().toISOString() };
         pages.push(page);
       }
       await savePageToDB(page);
       updateScanStatus();
-      showToast(overwrite ? `已覆盖第 ${page.index} 页` : `已保存第 ${page.index} 页`);
+      showToast(previousData != null ? `已更新第 ${page.index} 页` : `已保存第 ${page.index} 页`);
     } catch (e) {
       console.error('保存失败', e);
-      if (page && !overwrite) {
-        const idx = pages.indexOf(page);
-        if (idx >= 0) pages.splice(idx, 1);
-      } else if (page && previousData != null) {
-        page.dataURL = previousData;
+      if (page) {
+        if (previousData != null) {
+          page.dataURL = previousData;
+          page.time = previousTime;
+        } else {
+          const idx = pages.indexOf(page);
+          if (idx >= 0) pages.splice(idx, 1);
+        }
       }
       showToast('保存失败：' + (e.message || e), true);
     } finally {
       saving = false;
       capturing = false;
       if (saveBtn) saveBtn.disabled = false;
-      if (overwriteBtn) overwriteBtn.disabled = false;
       updateScanStatus();
     }
   }
-
-  function saveCurrentPage() { return captureAndStore(false); }
-  function overwriteLastPage() { return captureAndStore(true); }
 
   let fontObserver = null;
   let fontPatchTimer = null;
@@ -772,10 +800,7 @@
         <div class="header" id="scan-header">扫描</div>
         <div class="body">
           <div class="status" id="scan-status">0 页</div>
-          <div style="display:flex;gap:4px;margin-bottom:5px;">
-            <button id="btnSave" style="flex:1;width:auto;margin-bottom:0;">保存</button>
-            <button id="btnOverwrite" title="覆盖最后一页" style="flex:0 0 46px;width:auto;margin-bottom:0;font-size:10px;">覆盖</button>
-          </div>
+          <button id="btnSave">保存</button>
           <button id="btnCurrent">下载当前</button>
           <button id="btnZip">下载全部</button>
           <button id="btnFont">字体</button>
@@ -920,7 +945,6 @@
 
     // 扫描按钮
     shadow.getElementById('btnSave').onclick = saveCurrentPage;
-    shadow.getElementById('btnOverwrite').onclick = overwriteLastPage;
     shadow.getElementById('btnCurrent').onclick = downloadCurrentPage;
     shadow.getElementById('btnZip').onclick = downloadAllImages;
     shadow.getElementById('btnClear').onclick = async () => {
@@ -945,27 +969,66 @@
 
   function pad4(n) { return String(n).padStart(4, '0'); }
 
-  function downloadCurrentPage() {
-    if (!pages.length) return alert('还没有截图');
-    const p = pages[pages.length - 1];
+  function dataURLToBlob(dataURL) {
+    if (typeof dataURL !== 'string' || !dataURL.startsWith('data:')) {
+      throw new Error('截图数据为空');
+    }
+    const comma = dataURL.indexOf(',');
+    if (comma < 0) throw new Error('截图数据格式错误');
+    const meta = dataURL.slice(5, comma);
+    const mime = meta.split(';')[0] || 'image/png';
+    const body = dataURL.slice(comma + 1);
+    let bytes;
+    if (/;base64/i.test(meta)) {
+      const bin = atob(body);
+      bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    } else {
+      bytes = new TextEncoder().encode(decodeURIComponent(body));
+    }
+    return new Blob([bytes], { type: mime });
+  }
+
+  function triggerBlobDownload(blob, filename) {
+    const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = p.dataURL;
-    a.download = `page_${pad4(p.index)}.png`;
+    a.href = url;
+    a.download = filename;
+    a.style.display = 'none';
     document.body.appendChild(a);
     a.click();
     a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
   }
 
-  function downloadAllImages() {
+  function downloadCurrentPage() {
     if (!pages.length) return alert('还没有截图');
-    pages.forEach(p => {
-      const a = document.createElement('a');
-      a.href = p.dataURL;
-      a.download = `page_${pad4(p.index)}.png`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-    });
+    const p = pages[pages.length - 1];
+    try {
+      triggerBlobDownload(dataURLToBlob(p.dataURL), `page_${pad4(p.index)}.png`);
+      showToast(`已导出第 ${p.index} 页`);
+    } catch (e) {
+      console.error('导出失败', e);
+      showToast('导出失败：' + (e.message || e), true);
+    }
+  }
+
+  async function downloadAllImages() {
+    if (!pages.length) return alert('还没有截图');
+    showToast(`正在导出 ${pages.length} 张…`);
+    let ok = 0;
+    let failed = 0;
+    for (const p of pages) {
+      try {
+        triggerBlobDownload(dataURLToBlob(p.dataURL), `page_${pad4(p.index)}.png`);
+        ok += 1;
+      } catch (e) {
+        failed += 1;
+        console.error(`导出第 ${p.index} 页失败`, e);
+      }
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    showToast(failed ? `已导出 ${ok} 张，${failed} 张失败` : `已导出 ${ok} 张`, !!failed);
   }
 
   async function init() {
