@@ -6,7 +6,7 @@
 
 | 脚本 | 版本 | 说明 |
 |------|------|------|
-| [cjk-mono.user.js](./cjk-mono.user.js) | 3.10.10 | 全站汉字/假名与等宽代码字体替换 |
+| [cjk-mono.user.js](./cjk-mono.user.js) | 3.10.11 | 全站汉字/假名与等宽代码字体替换 |
 
 ---
 
@@ -31,7 +31,7 @@
 2. 打开 raw 链接，扩展会弹出安装确认：  
    https://raw.githubusercontent.com/wafbys/IcedUserScript/master/cjk-mono.user.js  
    或把 `cjk-mono.user.js` 全文粘贴到「新建脚本」
-3. 确认本机已安装目标字体（默认 **KingHwaOldSong-GB**，family 名须完全一致）
+3. 确认本机已安装目标字体（默认 **KingHwaOldSong-GB**；脚本按 `local()` 名称和别名依次探测）
 4. 刷新目标网页；需要时 `Ctrl+Shift+F` 打开面板调整
 
 已从旧文件名 `CJK-Mono 字体替换.js` 安装过的，请再导入一次 `cjk-mono.user.js`（`@name` / `@namespace` 不变，配置会保留）。
@@ -54,20 +54,23 @@
 
 | 类型 | 默认值 |
 |------|--------|
-| CJK | `KingHwaOldSong-GB`（仅此精确名称，无变体别名） |
+| CJK | `KingHwaOldSong-GB`（首选名称；`local()` 兼容 `KingHwaOldSongGB`） |
 | 代码 | `NewComputerModern Mono 10` |
 
-面板可选 CJK：`KingHwaOldSong-GB`、`Ku Mincho`、`Ku Mincho BIG5GB`（本机补字版：Big5+GBK+JIS 缺字补全，字形来自京华老宋体-GB / 汇文明朝体）。  
+面板可选 CJK：`KingHwaOldSong-GB`、`Ku Mincho`、`Ku Mincho BIG5GB`（本机补字版：Big5+GBK+JIS 缺字补全，字形来自京华老宋体-GB / 汇文明朝体）、`Huiwen-mincho AI Supplement v1`（公有领域补字版，需本机安装）。
+
 可选代码字体：`NewComputerModern Mono 10`、`Cascadia Code`、`Fira Code`、`JetBrains Mono`、`Courier New`。
+
+`Ku Mincho` 是日文字形集，简化字覆盖不全；选中时脚本会自动在其后接 `Huiwen-mincho AI Supplement v1` 补缺字（该字体未安装时回退到原字体栈）。`Ku Mincho BIG5GB` 未安装时也会回退到该补字字体，避免选项完全失效。
 
 可在脚本内修改 `DEFAULT_CONFIG` / `FONT_CHOICES` 以增删选项。  
 要让其它阅读站也走 CSS 变量覆盖，把主机后缀加进 `READING_SITE_SUFFIXES`。
 
 ### 原理简述
 
-1. 注入 `@font-face` 族名 `CJKPatch`，`src: local("你的字体名")`，并限定 `unicode-range` 覆盖汉字基本区、扩展 A–J、假名、兼容区、全角等（不含韩文 Hangul）
+1. 注入 `@font-face` 族名 `CJKPatch`，`src: local("你的字体名")`，并限定 `unicode-range` 覆盖汉字基本区、扩展 A–J、假名、兼容区、全角等（不含韩文 Hangul）；选中 `Ku Mincho` 时再注入 `CJKPatchSupp` 补字族，缺字按字体栈顺序落到补字字体
 2. 对含汉字/假名的节点写入 `font-family: "CJKPatch", … !important`；`unicode-range` 使西文仍走后面的原字体栈
-3. 仅在阅读站 allowlist 上覆盖该站已有的 CSS 字体变量（前置 `"CJKPatch"`，保留原 stack）。正文模块用 inline 前置兜底；守卫用 `setProperty` 包装 + 观察 `html[style]` 属性，不注入页面 JS 上下文
+3. 仅在阅读站 allowlist 上覆盖该站已有的 CSS 字体变量（前置 `"CJKPatch"`，`Ku Mincho` 时再加 `"CJKPatchSupp"`，保留原 stack）。正文模块用 inline 前置兜底；守卫用 `setProperty` 包装 + 观察 `html[style]` 属性，不注入页面 JS 上下文
 4. `@font-face` 在 `document-start` 等 `<head>` 出现后注入；DOM 扫描仍等 `body` 之后再 idle 批处理。SPA 路由（`pushState` / `replaceState` / `popstate`）与短时守护轮询做二次注入；面板重新启用会重新挂上这些钩子
 
 ### 读通鉴等站点说明
@@ -102,6 +105,7 @@
 
 | 版本 | 变更 |
 |------|------|
+| 3.10.11 | `Ku Mincho` 缺字自动接 `Huiwen-mincho AI Supplement v1` 补字；`Ku Mincho BIG5GB` 未安装时回退补字字体；新增补字字体选项与 `local()` 别名；CSS 变量守卫保留补字族 |
 | 3.10.10 | 阅读站正文兜底改为 inline 前置，移除 `font-family: "CJKPatch", inherit` 无效声明；更新链接指向 `IcedUserScript` 仓库 |
 | 3.10.9 | 面板 CJK 候选新增 `Ku Mincho BIG5GB`（本机补字字体，非回退逻辑变更） |
 | 3.10.8 | 贴吧 CSS/DOM 补丁完全恢复为 3.10.5（`#app *` + 计算值已含 CJKPatch 则跳过） |

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CJK/Mono 字体替换
 // @namespace    http://tampermonkey.net/
-// @version      3.10.10
+// @version      3.10.11
 // @description  高性能汉字/假名及等宽字体替换。支持按网站配置、Shadow DOM、动态内容及输入框实时替换。附带热键控制面板 (Ctrl+Shift+F)。
 // @match        *://*/*
 // @run-at       document-start
@@ -47,22 +47,22 @@
     '[class*="reader-content"]',
   ].join(',\n      ');
 
-  function extraHostCss() {
+  function extraHostCss(familyStack = '"CJKPatch"') {
     if (!hostEqualsOrSuffix(CURRENT_HOST, 'tieba.baidu.com')) return '';
     // 新版贴吧 CSR：index.css 有 `*{font-family:PingFang SC,...}`，每个节点自己带字体
     return `
       #app {
-        --cos-font-family: "CJKPatch", "PingFang SC";
-        --text-family-chinese: "CJKPatch", "PingFang SC";
+        --cos-font-family: ${familyStack}, "PingFang SC";
+        --text-family-chinese: ${familyStack}, "PingFang SC";
       }
       #app, #app *:not(code):not(pre):not(kbd):not(samp) {
-        font-family: "CJKPatch", "PingFang SC", Arial, sans-serif, tahoma !important;
+        font-family: ${familyStack}, "PingFang SC", Arial, sans-serif, tahoma !important;
       }
       #app .baidunumber-Bold,
       #app .baidunumber-Medium,
       #app .baidunumber-Regular,
       #app .cos-font-family-number {
-        font-family: "CJKPatch", baidunumber-Regular, baidunumber-Medium, baidunumber-Bold, "baidunumber plus" !important;
+        font-family: ${familyStack}, baidunumber-Regular, baidunumber-Medium, baidunumber-Bold, "baidunumber plus" !important;
       }`;
   }
 
@@ -89,8 +89,22 @@
   };
 
   const FONT_CHOICES = {
-    cjk: ['KingHwaOldSong-GB', 'Ku Mincho', 'Ku Mincho BIG5GB'],
+    cjk: ['KingHwaOldSong-GB', 'Ku Mincho', 'Ku Mincho BIG5GB', 'Huiwen-mincho AI Supplement v1'],
     code: ['NewComputerModern Mono 10', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', 'Courier New'],
+  };
+
+  // Ku Mincho 是日文字形集，简化字覆盖不全；选中时用本机补字字体接住缺字。
+  // BIG5GB 未安装时也回退到补字字体，避免该选项完全失效。
+  const FONT_SUPPLEMENTS = {
+    'Ku Mincho': 'Huiwen-mincho AI Supplement v1',
+  };
+
+  // local() 在不同字体集合/浏览器下认的名字不同，按优先级列出。
+  const LOCAL_FONT_ALIASES = {
+    'Ku Mincho': ['Ku Mincho', 'KuMincho-Regular', 'Ku Mincho R', '空明朝體'],
+    'Ku Mincho BIG5GB': ['Ku Mincho BIG5GB', 'Huiwen-mincho AI Supplement v1'],
+    'Huiwen-mincho AI Supplement v1': ['Huiwen-mincho AI Supplement v1', '汇文明朝体 AI 补字版 v1'],
+    'KingHwaOldSong-GB': ['KingHwaOldSong-GB', 'KingHwaOldSongGB'],
   };
 
   function hostEqualsOrSuffix(host, suffix) {
@@ -106,7 +120,22 @@
   }
 
   function buildLocalSrc(fontName) {
-    return `local("${fontName}")`;
+    const names = LOCAL_FONT_ALIASES[fontName] || [fontName];
+    return names.map(name => `local("${name}")`).join(', ');
+  }
+
+  function supplementFontFor(fontName = CONFIG.font?.cjk) {
+    return FONT_SUPPLEMENTS[fontName] || '';
+  }
+
+  function patchFamilyStack(fontName = CONFIG.font?.cjk) {
+    return supplementFontFor(fontName) ? '"CJKPatch", "CJKPatchSupp"' : '"CJKPatch"';
+  }
+
+  function hasActivePatchFamily(value) {
+    const s = String(value || '');
+    if (!s.includes('CJKPatch')) return false;
+    return !supplementFontFor() || s.includes('CJKPatchSupp');
   }
 
   const CONFIG = {};
@@ -181,9 +210,10 @@
   const isPatchActive = () => CONFIG.enabled && !isSiteBlacklisted();
 
   function stripCjkPatchPrefix(value) {
+    const prefix = /^"(?:CJKPatch|CJKPatchSupp)"\s*,\s*/;
     let s = String(value || '').trim();
-    while (/^"CJKPatch"\s*,\s*/.test(s)) {
-      s = s.replace(/^"CJKPatch"\s*,\s*/, '').trim();
+    while (prefix.test(s)) {
+      s = s.replace(prefix, '').trim();
     }
     return s;
   }
@@ -209,12 +239,12 @@
     origCssVarMap.set(root, saved);
   }
 
-  function patchedVarValue(name, root) {
+  function patchedVarValue(name, root, familyStack = '"CJKPatch"') {
     let current = '';
     try { current = getComputedStyle(root).getPropertyValue(name).trim(); } catch (e) {}
     const captured = origCssVarMap.get(root)?.[name]?.computed || '';
     const base = stripCjkPatchPrefix(current && !current.includes('CJKPatch') ? current : (current || captured));
-    return base ? `"CJKPatch", ${base}` : '';
+    return base ? `${familyStack}, ${base}` : '';
   }
 
   function injectGlobalStyle(doc = document) {
@@ -228,6 +258,15 @@
     const cjkName = CONFIG.font?.cjk || DEFAULT_CONFIG.fonts.default.cjk;
     const codeName = CONFIG.font?.code || DEFAULT_CONFIG.fonts.default.code;
     const localSrc = buildLocalSrc(cjkName);
+    const supplementName = supplementFontFor(cjkName);
+    const familyStack = patchFamilyStack(cjkName);
+    const supplementFace = supplementName ? `
+      @font-face {
+        font-family: "CJKPatchSupp";
+        src: ${buildLocalSrc(supplementName)};
+        unicode-range: ${DEFAULT_CONFIG.unicodeRange};
+        font-display: swap;
+      }` : '';
 
     let readingCss = '';
     if (isReadingSite()) {
@@ -236,7 +275,7 @@
       const varLines = [];
       if (root) {
         for (const name of CSS_FONT_VARS) {
-          const value = patchedVarValue(name, root);
+          const value = patchedVarValue(name, root, familyStack);
           if (value) varLines.push(`${name}: ${value} !important;`);
         }
       }
@@ -256,7 +295,7 @@
         src: ${localSrc};
         unicode-range: ${DEFAULT_CONFIG.unicodeRange};
         font-display: swap;
-      }${readingCss}${extraHostCss()}
+      }${supplementFace}${readingCss}${extraHostCss(familyStack)}
       code, pre, kbd, samp {
         font-family: "${codeName}", "Cascadia Code", "JetBrains Mono", "Fira Code", "Consolas", "${cjkName}", monospace !important;
         font-variant-ligatures: none;
@@ -274,7 +313,7 @@
           if (root?.style) {
             let patched = 0;
             for (const name of CSS_FONT_VARS) {
-              const value = patchedVarValue(name, root);
+              const value = patchedVarValue(name, root, familyStack);
               if (!value) continue;
               root.style.setProperty(name, value, 'important');
               patched += 1;
@@ -363,14 +402,14 @@
     try {
       const computedFamily = getComputedStyle(el).fontFamily;
       const inlineFamily = el.style.fontFamily || '';
-      if (computedFamily.includes('CJKPatch') || inlineFamily.includes('CJKPatch')) {
+      if (hasActivePatchFamily(computedFamily) || hasActivePatchFamily(inlineFamily)) {
         if (!el.hasAttribute(PATCH_ATTR)) el.setAttribute(PATCH_ATTR, 'computed');
         return;
       }
       if (!el.hasAttribute(ORIG_ATTR)) {
         el.setAttribute(ORIG_ATTR, inlineFamily);
       }
-      el.style.setProperty('font-family', `"CJKPatch", ${computedFamily}`, 'important');
+      el.style.setProperty('font-family', `${patchFamilyStack()}, ${computedFamily}`, 'important');
       el.setAttribute(PATCH_ATTR, 'inlined');
     } catch (e) {}
   }
@@ -493,7 +532,7 @@
       let needsInject = styleMissing;
       if (isReadingSite()) {
         const classical = root ? getComputedStyle(root).getPropertyValue('--font-family-classical').trim() : '';
-        const varsStolen = classical && !classical.includes('CJKPatch');
+        const varsStolen = classical && !hasActivePatchFamily(classical);
         const varsPending = classical && root.getAttribute('data-cjk-vars-patched') !== '1';
         needsInject = needsInject || varsStolen || varsPending;
       }
@@ -521,7 +560,7 @@
       if (allowCssVarMutations || !isPatchActive() || !isReadingSite()) return;
       let classical = '';
       try { classical = getComputedStyle(root).getPropertyValue('--font-family-classical').trim(); } catch (e) {}
-      if (classical && !classical.includes('CJKPatch')) injectGlobalStyle(document);
+      if (classical && !hasActivePatchFamily(classical)) injectGlobalStyle(document);
     });
     cssVarAttrObserver.observe(root, { attributes: true, attributeFilter: ['style'] });
   }
@@ -540,11 +579,12 @@
           && typeof prop === 'string'
           && CSS_FONT_VARS.includes(prop)
           && typeof value === 'string'
-          && !value.includes('CJKPatch')
+          && !hasActivePatchFamily(value)
+          && !/^(?:inherit|initial|unset|revert|revert-layer)$/i.test(value.trim())
         ) {
           try {
             if (this === document.documentElement.style) {
-              return original.call(this, prop, `"CJKPatch", ${value}`, 'important');
+              return original.call(this, prop, `${patchFamilyStack()}, ${stripCjkPatchPrefix(value)}`, 'important');
             }
           } catch (e) {}
         }
