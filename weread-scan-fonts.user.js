@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微信读书扫描 + 字体
 // @namespace    https://weread.qq.com/
-// @version      1.5
+// @version      1.6
 // @description  正文截图 + 可呼出的字体设置
 // @author       Grok
 // @match        https://weread.qq.com/web/reader/*
@@ -255,16 +255,20 @@
 
   function buildMainStack() {
     const fonts = [];
-    if (fontSettings.enMode === 'force') {
-      const key = ['sans', 'serif', 'mono'].includes(fontSettings.forceEn) ? fontSettings.forceEn : 'serif';
-      const forced = fontSettings[key];
-      if (forced?.enabled && forced?.font) fonts.push(`"${forced.font}"`);
-    }
-    if (fontSettings.zh?.enabled && fontSettings.zh?.font) fonts.push(`"${fontSettings.zh.font}"`);
-    for (const key of ['sans', 'serif']) {
+    const push = (key) => {
       const item = fontSettings[key];
-      if (item?.enabled && item?.font) fonts.push(`"${item.font}"`);
+      const name = item?.enabled && item?.font ? item.font : '';
+      if (name && !fonts.includes(`"${name}"`)) fonts.push(`"${name}"`);
+    };
+    if (fontSettings.enMode === 'force') {
+      push(['sans', 'serif', 'mono'].includes(fontSettings.forceEn) ? fontSettings.forceEn : 'serif');
+    } else {
+      // 兜底先给英文 face，避免英文落到中文字体的拉丁字形；中文靠后面的中文字体接住
+      push('serif');
     }
+    push('zh');
+    push('sans');
+    push('serif');
     return fonts.length ? fonts.join(', ') + ', sans-serif' : '';
   }
 
@@ -453,7 +457,7 @@
 
   function patchFontElement(el) {
     if (!el || el.nodeType !== 1 || !el.style) return;
-    if (el.closest?.('script, style, noscript, template, button, [role="button"], input, textarea, select, nav, header, footer, [class*="toolbar"], [class*="menu"]')) return;
+    if (el.closest?.('script, style, noscript, template, button, [role="button"], input, textarea, select, svg, [class*="icon"]')) return;
     const role = roleForElement(el);
     if (el.getAttribute(PATCH_ATTR) === role) return;
 
