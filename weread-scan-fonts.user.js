@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微信读书扫描 + 字体
 // @namespace    https://weread.qq.com/
-// @version      1.4
+// @version      1.5
 // @description  正文截图 + 可呼出的字体设置
 // @author       Grok
 // @match        https://weread.qq.com/web/reader/*
@@ -237,6 +237,8 @@
 
   let fontObserver = null;
   let fontPatchTimer = null;
+  let activeFaceCss = '';
+  let activeFallbackCss = '';
 
   function buildFace(name, fontName, range, fallbacks = []) {
     const sources = [fontName, ...fallbacks]
@@ -249,6 +251,45 @@
       unicode-range: ${range};
       font-display: swap;
     }`;
+  }
+
+  function buildMainStack() {
+    const fonts = [];
+    if (fontSettings.enMode === 'force') {
+      const key = ['sans', 'serif', 'mono'].includes(fontSettings.forceEn) ? fontSettings.forceEn : 'serif';
+      const forced = fontSettings[key];
+      if (forced?.enabled && forced?.font) fonts.push(`"${forced.font}"`);
+    }
+    if (fontSettings.zh?.enabled && fontSettings.zh?.font) fonts.push(`"${fontSettings.zh.font}"`);
+    for (const key of ['sans', 'serif']) {
+      const item = fontSettings[key];
+      if (item?.enabled && item?.font) fonts.push(`"${item.font}"`);
+    }
+    return fonts.length ? fonts.join(', ') + ', sans-serif' : '';
+  }
+
+  function buildCodeStack() {
+    const fonts = [];
+    if (fontSettings.enMode === 'force') {
+      const key = ['sans', 'serif', 'mono'].includes(fontSettings.forceEn) ? fontSettings.forceEn : 'serif';
+      const forced = fontSettings[key];
+      if (forced?.enabled && forced?.font) fonts.push(`"${forced.font}"`);
+    } else if (fontSettings.mono?.enabled && fontSettings.mono?.font) {
+      fonts.push(`"${fontSettings.mono.font}"`);
+    }
+    if (fontSettings.zh?.enabled && fontSettings.zh?.font) fonts.push(`"${fontSettings.zh.font}"`);
+    return fonts.length ? fonts.join(', ') + ', monospace' : '';
+  }
+
+  function buildFallbackCss() {
+    const main = buildMainStack();
+    if (!main) return '';
+    const code = buildCodeStack();
+    return `
+    body, body *:not(script):not(style):not(noscript):not(template):not(svg):not(button):not(input):not(textarea):not(select):not([role="button"]):not([class*="icon"]):not([class*="Icon"]) {
+      font-family: ${main} !important;
+    }
+    ${code ? `code, pre, kbd, samp { font-family: ${code} !important; }` : ''}`;
   }
 
   function getFontStyle(doc = document) {
@@ -434,19 +475,55 @@
   }
 
   function patchReaderFonts() {
-    for (const root of collectFontRoots()) {
-      if (!root?.querySelectorAll) continue;
-      const doc = root.ownerDocument || document;
-      const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-        acceptNode(node) {
-          return (node.nodeValue && TEXT_REGEX.test(node.nodeValue))
-            ? NodeFilter.FILTER_ACCEPT
-            : NodeFilter.FILTER_REJECT;
-        }
+    const roots = collectFontRoots();
+    const docs = new Set([document]);
+    roots.forEach(root => {
+      if (root.ownerDocument) docs.add(root.ownerDocument);
+    });
+    // 书籍设定要读原书 face，不能让全局兜底污染 getComputedFamily；补丁期间临时撤掉兜底。
+    const suspend = fontSettings.enMode === 'book' && !!activeFallbackCss;
+    if (suspend) {
+      docs.forEach(doc => {
+        if (doc.documentElement) getFontStyle(doc).textContent = activeFaceCss;
       });
-      let node;
-      while ((node = walker.nextNode())) {
-        patchFontElement(node.parentElement);
+      roots.filter(root => root.nodeType === 11).forEach(root => {
+        const style = root.getElementById?.('weread-shadow-fonts');
+        if (style) style.textContent = '';
+      });
+    }
+    try {
+      for (const root of roots) {
+        if (!root?.querySelectorAll) continue;
+        const doc = root.ownerDocument || document;
+        const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+          acceptNode(node) {
+            return (node.nodeValue && TEXT_REGEX.test(node.nodeValue))
+              ? NodeFilter.FILTER_ACCEPT
+              : NodeFilter.FILTER_REJECT;
+          }
+        });
+        let node;
+        while ((node = walker.nextNode())) {
+          patchFontElement(node.parentElement);
+        }
+      }
+    } finally {
+      if (suspend) {
+        docs.forEach(doc => {
+          if (doc.documentElement) {
+            getFontStyle(doc).textContent = activeFaceCss + '\n' + activeFallbackCss;
+          }
+        });
+        const shadowCss = activeFallbackCss.replace('body, body *', ':host, :host *');
+        roots.filter(root => root.nodeType === 11).forEach(root => {
+          let style = root.getElementById?.('weread-shadow-fonts');
+          if (!style) {
+            style = (root.ownerDocument || document).createElement('style');
+            style.id = 'weread-shadow-fonts';
+            root.appendChild(style);
+          }
+          style.textContent = shadowCss;
+        });
       }
     }
   }
@@ -467,7 +544,6 @@
   }
 
   function applyFonts() {
-    undoFontPatches();
     const faces = [];
     if (fontSettings.zh?.enabled && fontSettings.zh?.font) {
       faces.push(buildFace('WR-CJK', fontSettings.zh.font, CJK_RANGE));
@@ -478,15 +554,46 @@
         faces.push(buildFace(`WR-${key}`, item.font, LATIN_RANGE, LATIN_FALLBACKS[key]));
       }
     }
+    const faceCss = faces.join('\n');
     const roots = collectFontRoots();
     const docs = new Set([document]);
     roots.forEach(root => {
       if (root.ownerDocument) docs.add(root.ownerDocument);
     });
+    activeFaceCss = faceCss;
+    activeFallbackCss = buildFallbackCss();
+    const fallbackCss = activeFallbackCss;
+
+    // 先撤掉全局兜底，让 getComputedFamily 读到原书字体，再打角色补丁；
+    // 补丁完成后再加兜底，兜底只接住没被打到的节点。
     docs.forEach(doc => {
-      if (doc.documentElement) getFontStyle(doc).textContent = faces.join('\n');
+      if (doc.documentElement) getFontStyle(doc).textContent = faceCss;
     });
+    roots.filter(root => root.nodeType === 11).forEach(root => {
+      const style = root.getElementById?.('weread-shadow-fonts');
+      if (style) style.textContent = '';
+    });
+
+    undoFontPatches();
     patchReaderFonts();
+
+    docs.forEach(doc => {
+      if (doc.documentElement) {
+        getFontStyle(doc).textContent = faceCss + '\n' + fallbackCss;
+      }
+    });
+    const shadowCss = fallbackCss.replace('body, body *', ':host, :host *');
+    if (shadowCss) {
+      roots.filter(root => root.nodeType === 11).forEach(root => {
+        let style = root.getElementById?.('weread-shadow-fonts');
+        if (!style) {
+          style = (root.ownerDocument || document).createElement('style');
+          style.id = 'weread-shadow-fonts';
+          root.appendChild(style);
+        }
+        style.textContent = shadowCss;
+      });
+    }
     observeFontMutations();
   }
 

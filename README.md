@@ -7,7 +7,7 @@
 | 脚本 | 版本 | 说明 |
 |------|------|------|
 | [cjk-mono.user.js](./cjk-mono.user.js) | 3.10.11 | 全站汉字/假名与等宽代码字体替换 |
-| [weread-scan-fonts.user.js](./weread-scan-fonts.user.js) | 1.4 | 微信读书正文截图 + 中英字体分离 |
+| [weread-scan-fonts.user.js](./weread-scan-fonts.user.js) | 1.5 | 微信读书正文截图 + 中英字体分离 |
 
 ---
 
@@ -131,7 +131,8 @@
 - **正文截图**：`html2canvas` 截取当前阅读区域，PNG 存入 IndexedDB
 - **中英分离**：`@font-face` + `unicode-range` 拆分拉丁与汉字，不依赖站点是否给 `sans` / `serif` / `mono` 打标记
 - **动态内容**：MutationObserver 监听切章、追加段落
-- **不碰图标 / UI**：只给含文字的元素加 inline `font-family`，保留原字体栈；跳过按钮、导航、菜单和图标 PUA 字符。补丁范围覆盖整页、同源 iframe 和 open shadow root，不再依赖阅读区宽度阈值
+- **不碰图标 / UI**：inline 补丁跳过按钮、导航、菜单和图标 PUA 字符；全局兜底也排除 button / input / svg / icon 类。补丁范围覆盖整页、同源 iframe 和 open shadow root，不再依赖阅读区宽度阈值
+- **全局兜底**：先打 inline 角色补丁，再套原版风格的全局字体栈；即使某些正文节点没被 inline 扫到，也仍能换字体
 
 ### 字体应用策略（三档）
 
@@ -186,6 +187,7 @@
 
 | 版本 | 变更 |
 |------|------|
+| 1.5 | 加回全局字体覆盖兜底；inline 角色补丁先执行，兜底后执行，保证书籍设定仍读原书 face |
 | 1.4 | 补丁范围改为整页，覆盖同源 iframe 与 open shadow root；修复窄阅读区 / iframe 正文不生效 |
 | 1.3 | 书籍设定改为读书中 face 并映射面板字体；强制设定覆盖代码块；四 face 模型写进面板提示与 README |
 | 1.2 | 字体应用策略三档、`unicode-range` 中英分离、`local()` 别名、动态内容观察 |
