@@ -7,7 +7,7 @@
 | 脚本 | 版本 | 说明 |
 |------|------|------|
 | [cjk-mono.user.js](./cjk-mono.user.js) | 3.10.11 | 全站汉字/假名与等宽代码字体替换 |
-| [weread-scan-fonts.user.js](./weread-scan-fonts.user.js) | 1.11 | 微信读书正文截图 + 中英字体分离 |
+| [weread-scan-fonts.user.js](./weread-scan-fonts.user.js) | 1.12 | 微信读书正文截图 + 中英字体分离 |
 
 ---
 
@@ -73,6 +73,7 @@
 2. 对含汉字/假名的节点写入 `font-family: "CJKPatch", … !important`；`unicode-range` 使西文仍走后面的原字体栈
 3. 仅在阅读站 allowlist 上覆盖该站已有的 CSS 字体变量（前置 `"CJKPatch"`，`Ku Mincho` 时再加 `"CJKPatchSupp"`，保留原 stack）。正文模块用 inline 前置兜底；守卫用 `setProperty` 包装 + 观察 `html[style]` 属性，不注入页面 JS 上下文
 4. `@font-face` 在 `document-start` 等 `<head>` 出现后注入；DOM 扫描仍等 `body` 之后再 idle 批处理。SPA 路由（`pushState` / `replaceState` / `popstate`）与短时守护轮询做二次注入；面板重新启用会重新挂上这些钩子
+5. 微信读书正文：hook `CanvasRenderingContext2D.prototype.fillText`，把 `wr_default_font` 临时换为面板中文 face；只换纯中文/中文标点，英文保持原样
 
 ### 读通鉴等站点说明
 
@@ -129,6 +130,9 @@
 ### 功能
 
 - **正文截图**：`html2canvas` 截取当前阅读区域，PNG 存入 IndexedDB
+- **Canvas 正文中文接管**：hook `CanvasRenderingContext2D.prototype.fillText`，把正文的 `wr_default_font` 临时换为面板中文 face；只换纯中文/中文标点，英文保持原样，避免字宽变化导致错位
+- **Canvas 页指纹**：用 `fillText` 抓到的文本做页指纹，替代 48×48 图像指纹；Canvas 书不再只能存两页，同一页重复保存会更新
+- **翻页稳定检测**：保存前等 canvas 文本稳定，避免翻页瞬间截到半页
 - **中英分离**：`@font-face` + `unicode-range` 拆分拉丁与汉字，不依赖站点是否给 `sans` / `serif` / `mono` 打标记
 - **动态内容**：MutationObserver 监听切章、追加段落
 - **不碰图标 / UI**：补丁和兜底都收进阅读区根（含同源 iframe 与 open shadow root），只跳过按钮、输入框、SVG 和图标；observer 只监听 `childList`
@@ -181,10 +185,12 @@
 ### 已知问题
 
 - 截图按扫描顺序累加，换书前建议先“下载全部”或“清空”，避免不同书的页面混在一起。
-- 同一页优先按正文文本指纹识别；正文不足 120 字时叠加 iframe 正文与 48×48 图像指纹，canvas 书主要依赖图像指纹。
+- 同一页优先按正文文本指纹识别；Canvas 书用 `fillText` 文本指纹，DOM 文本不足 120 字时才走图像指纹。
 - “下载全部”是逐张触发浏览器下载；首次可能询问是否允许多文件下载。
 - 页面较多时 IndexedDB 会占用较大空间，注意浏览器存储配额。
-- Canvas 渲染的书籍无法用 CSS 改字体。
+- Canvas 正文的字体由站点绘制；1.12 起用 Canvas hook 接管中文。若正文族不是 `wr_default_font`，控制台执行 `__wereadScanDebug.canvasFonts()` 查看实际值，再调整脚本里的 `CANVAS_FAMILY`。
+- Canvas 英文字体暂不替换，避免字宽变化导致错位；需要时先按原字体 `measureText` 定位，再逐字替换。
+- 首次安装时 `@require` 需要先下载 html2canvas；如果第一页没换字体，翻一页或刷新即可。
 - 规则设定的标题只认 `h1`–`h6` / `[role="heading"]`；标题是普通 `div` 时请用“强制设定”。
 - 书籍设定靠类名和字体栈识别 face，复杂书籍可能识别不到，此时回退到规则设定。
 
@@ -192,6 +198,7 @@
 
 | 版本 | 变更 |
 |------|------|
+| 1.12 | 加 Canvas 中文 hook、`fillText` 文本指纹、翻页稳定检测；`@run-at` 改 `document-start`，修复 Canvas 书字体和页识别 |
 | 1.11 | 同一页识别加入 iframe 正文与 48×48 图像指纹，修复 canvas/iframe 书只能保存两页 |
 | 1.10 | 恢复初始版本的截图目标选择；主目标生成空图时自动回退 canvas 父级 / body，修复“截图数据无效” |
 | 1.9 | 保存自动识别同一页并更新，移除“覆盖”按钮；下载改用 Blob 生成文件，修复导出的 PNG 打不开 |
@@ -208,6 +215,7 @@
 
 ```text
 @match        https://weread.qq.com/web/reader/*
+@run-at       document-start
 @grant        none
 @require      https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js
 ```

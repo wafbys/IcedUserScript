@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         微信读书扫描 + 字体
 // @namespace    https://weread.qq.com/
-// @version      1.11
+// @version      1.12
 // @description  正文截图 + 可呼出的字体设置
 // @author       Grok
 // @match        https://weread.qq.com/web/reader/*
+// @run-at       document-start
 // @require      https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js
 // @grant        none
 // ==/UserScript==
@@ -90,6 +91,147 @@
   let shadow = null;
   let fontSettings = loadFontSettings();
   let fontPanelOpen = false;
+
+  // ---- Canvas 正文接管 ----
+  // 微信读书正文用 Canvas 逐字绘制，字体族通常是 wr_default_font；CSS 的 WR-* 字体碰不到它。
+  // 这里只在 fillText 时把中文字体临时换成面板字体，英文保持原样，避免字宽变化导致排版错位。
+  // 思路参考 WANGXIN-567/weread-book-exporter（MIT）。
+  const CANVAS_FAMILY = 'wr_default_font';
+  const CANVAS_FAMILY_RE = /(["']?)wr_default_font\1/g;
+  const CANVAS_CJK_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\u3000-\u303F\uFF00-\uFFEF]/u;
+  const CANVAS_LATIN_RE = /[A-Za-z0-9]/;
+  const canvasTextByCanvas = new WeakMap();
+  const canvasFontCache = new Map();
+  const canvasFontCounts = new Map();
+  let canvasClearCount = 0;
+  let canvasRewriteCount = 0;
+
+  function isCanvasTarget(canvas) {
+    return !!canvas && canvas.isConnected && canvas.width > 200 && canvas.height > 200;
+  }
+
+  function canvasTextCount() {
+    let n = 0;
+    document.querySelectorAll('canvas').forEach(canvas => {
+      if (!isCanvasTarget(canvas)) return;
+      const buf = canvasTextByCanvas.get(canvas);
+      if (buf) n += buf.join('').length;
+    });
+    return n;
+  }
+
+  function canvasTextSignature() {
+    if (!canvasClearCount) return '';
+    const parts = [];
+    document.querySelectorAll('canvas').forEach(canvas => {
+      if (!isCanvasTarget(canvas)) return;
+      const buf = canvasTextByCanvas.get(canvas);
+      if (buf && buf.length) parts.push(buf.join(''));
+    });
+    const text = parts.join('').replace(/\s+/g, '');
+    if (text.length < 4) return '';
+    return 't:' + hashString(`${location.pathname}|${text}`);
+  }
+
+  async function waitForCanvasStable(timeout = 1500) {
+    if (!canvasClearCount) return false;
+    const start = performance.now();
+    let last = -1;
+    let stable = 0;
+    while (performance.now() - start < timeout) {
+      const count = canvasTextCount();
+      if (count > 0 && count === last) {
+        stable += 1;
+        if (stable >= 2) return true;
+      } else {
+        last = count;
+        stable = 0;
+      }
+      await new Promise(resolve => setTimeout(resolve, 150));
+    }
+    return false;
+  }
+
+  function installCanvasHook() {
+    if (window.__wereadScanCanvasHook || typeof CanvasRenderingContext2D === 'undefined') return;
+    window.__wereadScanCanvasHook = true;
+
+    const proto = CanvasRenderingContext2D.prototype;
+    const origFillText = proto.fillText;
+    const origClearRect = proto.clearRect;
+
+    proto.fillText = function (text, x, y, ...rest) {
+      const s = String(text ?? '');
+      const canvas = this.canvas;
+      const target = isCanvasTarget(canvas);
+
+      if (target) {
+        if (s.trim()) {
+          let buf = canvasTextByCanvas.get(canvas);
+          if (!buf) {
+            buf = [];
+            canvasTextByCanvas.set(canvas, buf);
+          }
+          buf.push(s);
+          if (buf.length > 8000) buf.splice(0, buf.length - 8000);
+        }
+        const f = this.font;
+        if (f) canvasFontCounts.set(f, (canvasFontCounts.get(f) || 0) + 1);
+      }
+
+      const zh = fontSettings.zh;
+      if (target && zh?.enabled && zh?.font && s.trim()
+          && CANVAS_CJK_RE.test(s) && !CANVAS_LATIN_RE.test(s)) {
+        const before = this.font;
+        const zhToken = JSON.stringify(zh.font);
+        if (before.includes(CANVAS_FAMILY)
+            && !before.includes(zh.font) && !before.includes(zhToken)) {
+          const key = `${before}\n${zh.font}`;
+          let after = canvasFontCache.get(key);
+          if (!after) {
+            after = before.replace(CANVAS_FAMILY_RE, () => `${zhToken}, ${CANVAS_FAMILY}`);
+            canvasFontCache.set(key, after);
+          }
+          let changed = false;
+          try {
+            this.font = after;
+            changed = true;
+            canvasRewriteCount += 1;
+          } catch (e) {}
+          try {
+            return origFillText.call(this, s, x, y, ...rest);
+          } finally {
+            if (changed) {
+              try { this.font = before; } catch (e) {}
+            }
+          }
+        }
+      }
+      return origFillText.call(this, s, x, y, ...rest);
+    };
+
+    proto.clearRect = function (x, y, w, h) {
+      if (isCanvasTarget(this.canvas) && w > 100 && h > 100) {
+        canvasClearCount += 1;
+        canvasTextByCanvas.set(this.canvas, []);
+      }
+      return origClearRect.call(this, x, y, w, h);
+    };
+  }
+
+  installCanvasHook();
+  if (!window.__wereadScanCanvasHook) {
+    document.addEventListener('DOMContentLoaded', installCanvasHook, { once: true });
+  }
+
+  // 调试入口：控制台执行 __wereadScanDebug.canvasFonts() 查看正文实际字体族
+  window.__wereadScanDebug = {
+    canvasFonts: () => [...canvasFontCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10),
+    canvasSignature: canvasTextSignature,
+    canvasChars: canvasTextCount,
+    canvasClears: () => canvasClearCount,
+    canvasRewrites: () => canvasRewriteCount,
+  };
 
   function loadFontSettings() {
     try {
@@ -310,6 +452,9 @@
     if (text.length >= 120) {
       return 't:' + hashString(`${location.pathname}|${text}`);
     }
+    // Canvas 书籍没有 DOM 正文；用 fillText 抓到的文字做页指纹，替代 48×48 图像指纹。
+    const canvasSig = canvasTextSignature();
+    if (canvasSig) return canvasSig;
     if (text.length >= 4) {
       return 's:' + hashString(`${location.pathname}|${text}`) + ':' + visual;
     }
@@ -387,6 +532,8 @@
     let previousTime = null;
     try {
       await new Promise(resolve => requestAnimationFrame(() => resolve()));
+      // 等 canvas 画完再截，避免翻页瞬间截到半页。
+      await waitForCanvasStable();
       const captured = await captureToDataURL();
       const dataURL = captured.dataURL;
       const identity = getPageIdentity(captured.target, captured.visual);
