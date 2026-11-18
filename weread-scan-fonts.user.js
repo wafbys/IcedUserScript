@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微信读书扫描 + 字体
 // @namespace    https://weread.qq.com/
-// @version      1.13
+// @version      1.15
 // @description  正文截图 + 可呼出的字体设置
 // @author       Grok
 // @match        https://weread.qq.com/web/reader/*
@@ -14,7 +14,9 @@
   'use strict';
 
   const DB_NAME = 'weread_scan_db';
+  const DB_VERSION = 2;
   const STORE_NAME = 'pages';
+  const EDGE_STORE = 'edges';
   const FONT_KEY = 'weread_font_settings';
   const PATCH_ATTR = 'data-weread-font-patched';
   const ORIG_ATTR = 'data-weread-orig-font';
@@ -81,6 +83,7 @@
     sans: { font: 'Inter', enabled: true },
     serif: { font: 'Stempel Garamond LT Std Subset', enabled: true },
     mono: { font: 'NewComputerModern Mono 10', enabled: true },
+    codeKeepOriginal: true, // 代码块默认保持站点原字体，避免换行/块高变化
     enMode: 'rules',   // 'book' | 'rules' | 'force'
     forceEn: 'serif'   // 仅 enMode === 'force' 时使用：'sans' | 'serif' | 'mono'
   };
@@ -88,6 +91,13 @@
   let db = null;
   let pages = [];
   let lastLayoutId = '';
+  let autoSaveEnabled = false;
+  let autoTimer = null;
+  let autoLastClear = 0;
+  let autoLastPageIdentity = '';
+  let autoTickRunning = false;
+  let autoDirection = 0;
+  let autoDirectionAt = 0;
   let host = null;
   let shadow = null;
   let fontSettings = loadFontSettings();
@@ -325,6 +335,16 @@
     canvasRewrites: () => canvasRewriteCount,
     canvasBodyFont,
     layout: getLayoutSignature,
+    auto: () => ({
+      enabled: autoSaveEnabled,
+      lastClear: autoLastClear,
+      clear: canvasClearCount,
+      lastPage: autoLastPageIdentity,
+      direction: autoDirection,
+      directionAt: autoDirectionAt,
+      tick: autoTickRunning,
+      timer: !!autoTimer,
+    }),
   };
 
   function loadFontSettings() {
@@ -360,12 +380,17 @@
 
   function openDB() {
     return new Promise((resolve, reject) => {
-      const req = indexedDB.open(DB_NAME, 1);
+      const req = indexedDB.open(DB_NAME, DB_VERSION);
       const timer = setTimeout(() => reject(new Error('IndexedDB 打开超时')), 10000);
       req.onupgradeneeded = e => {
         const database = e.target.result;
         if (!database.objectStoreNames.contains(STORE_NAME)) {
           database.createObjectStore(STORE_NAME, { keyPath: 'index' });
+        }
+        if (!database.objectStoreNames.contains(EDGE_STORE)) {
+          const store = database.createObjectStore(EDGE_STORE, { keyPath: 'key' });
+          store.createIndex('from', 'from', { unique: false });
+          store.createIndex('to', 'to', { unique: false });
         }
       };
       req.onsuccess = e => {
@@ -407,6 +432,12 @@
     return waitTransaction(tx, 'IndexedDB 写入');
   }
 
+  async function saveEdgeToDB(edge) {
+    const tx = db.transaction(EDGE_STORE, 'readwrite');
+    tx.objectStore(EDGE_STORE).put(edge);
+    return waitTransaction(tx, 'IndexedDB 写入翻页边');
+  }
+
   async function loadAllPages() {
     const tx = db.transaction(STORE_NAME, 'readonly');
     const req = tx.objectStore(STORE_NAME).getAll();
@@ -430,8 +461,9 @@
   }
 
   async function clearDB() {
-    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const tx = db.transaction([STORE_NAME, EDGE_STORE], 'readwrite');
     tx.objectStore(STORE_NAME).clear();
+    tx.objectStore(EDGE_STORE).clear();
     return waitTransaction(tx, 'IndexedDB 清空');
   }
 
@@ -543,12 +575,12 @@
       });
     } catch (e) {}
     const text = parts.join(' ').replace(/\s+/g, ' ').trim();
+    // Canvas 正文优先：WeRead 阅读页 DOM 里可能仍有固定的 UI 文本，按 DOM 排会把每页判成同一页。
+    const canvasSig = canvasTextSignature();
+    if (canvasSig) return canvasSig;
     if (text.length >= 120) {
       return 't:' + hashString(`${location.pathname}|${text}`);
     }
-    // Canvas 书籍没有 DOM 正文；用 fillText 抓到的文字做页指纹，替代 48×48 图像指纹。
-    const canvasSig = canvasTextSignature();
-    if (canvasSig) return canvasSig;
     if (text.length >= 4) {
       return 's:' + hashString(`${location.pathname}|${text}`) + ':' + visual;
     }
@@ -609,18 +641,18 @@
     }
   }
 
-  async function saveCurrentPage() {
-    if (saving) return;
+  async function saveCurrentPage(isAuto = false) {
+    if (saving) return null;
     if (!db) {
-      showToast('截图存储尚未就绪', true);
-      return;
+      if (!isAuto) showToast('截图存储尚未就绪', true);
+      return null;
     }
     saving = true;
     capturing = true;
     const saveBtn = shadow?.getElementById('btnSave');
     if (saveBtn) saveBtn.disabled = true;
-    updateScanStatus('截图中…');
-    showToast('截图中…');
+    updateScanStatus(isAuto ? '自动保存中…' : '截图中…');
+    if (!isAuto) showToast('截图中…');
 
     let page = null;
     let previousData = null;
@@ -634,6 +666,10 @@
       await waitForCanvasStable();
       const layout = getLayoutSignature();
       layoutChanged = pages.length > 0 && !!lastLayoutId && lastLayoutId !== layout.id;
+      if (isAuto && layoutChanged) {
+        pauseAutoForLayout(layout);
+        return null;
+      }
       const layoutInfo = {
         w: layout.w,
         h: layout.h,
@@ -647,7 +683,15 @@
         fonts: layout.fonts,
         theme: layout.theme,
       };
+      const epochBefore = canvasClearCount;
+      const tokenBefore = canvasTextSignature();
       const captured = await captureToDataURL();
+      const epochAfter = canvasClearCount;
+      const tokenAfter = canvasTextSignature();
+      if (epochBefore !== epochAfter
+          || (tokenBefore && tokenAfter && tokenBefore !== tokenAfter)) {
+        throw new Error('页面已变化，已取消本次截图');
+      }
       const dataURL = captured.dataURL;
       const identity = getPageIdentity(captured.target, captured.visual);
       // 同页 + 同版面才更新；旧版本没有 layoutId 的页做一次迁移。
@@ -679,15 +723,18 @@
       lastLayoutId = layout.id;
       updateScanStatus();
       updateLayoutInfo(layout, layoutChanged);
-      const verb = previousData != null ? '更新' : '保存';
-      showToast(
-        layoutChanged ? `版面已变，已${verb}第 ${page.index} 页` :
-          previousData != null ? `已更新第 ${page.index} 页` : `已保存第 ${page.index} 页`,
-        false,
-        layoutChanged,
-      );
+      if (!isAuto) {
+        const verb = previousData != null ? '更新' : '保存';
+        showToast(
+          layoutChanged ? `版面已变，已${verb}第 ${page.index} 页` :
+            previousData != null ? `已更新第 ${page.index} 页` : `已保存第 ${page.index} 页`,
+          false,
+          layoutChanged,
+        );
+      }
+      return page;
     } catch (e) {
-      console.error('保存失败', e);
+      console.error(isAuto ? '自动保存失败' : '保存失败', e);
       if (page) {
         if (previousData != null) {
           page.dataURL = previousData;
@@ -699,7 +746,10 @@
           if (idx >= 0) pages.splice(idx, 1);
         }
       }
-      showToast('保存失败：' + (e.message || e), true);
+      if (!(isAuto && /页面已变化/.test(e.message || ''))) {
+        showToast((isAuto ? '自动保存失败：' : '保存失败：') + (e.message || e), true);
+      }
+      return null;
     } finally {
       saving = false;
       capturing = false;
@@ -707,6 +757,155 @@
       updateScanStatus();
     }
   }
+
+  function updateAutoButton() {
+    const btn = shadow?.getElementById('btnAuto');
+    if (!btn) return;
+    btn.textContent = `自动保存：${autoSaveEnabled ? '开' : '关'}`;
+    btn.classList.toggle('active', autoSaveEnabled);
+  }
+
+  function pauseAutoForLayout(layout) {
+    autoSaveEnabled = false;
+    clearTimeout(autoTimer);
+    autoTimer = null;
+    updateAutoButton();
+    updateLayoutInfo(layout, true);
+    showToast('版面已变，自动保存已关闭', false, true);
+  }
+
+  function setAutoSave(enabled) {
+    if (enabled) {
+      if (!db) {
+        showToast('截图存储尚未就绪', true);
+        return;
+      }
+      const layout = getLayoutSignature();
+      if (lastLayoutId && layout.id !== lastLayoutId) {
+        updateLayoutInfo(layout, true);
+        showToast('版面已变，请先手动保存一页确认新版面', false, true);
+        return;
+      }
+      autoSaveEnabled = true;
+      autoLastClear = canvasClearCount;
+      autoLastPageIdentity = pages.length ? pages[pages.length - 1].identity : '';
+      autoDirection = 0;
+      autoDirectionAt = 0;
+      updateAutoButton();
+      showToast('自动保存已开启');
+      autoSchedule(600);
+      return;
+    }
+    autoSaveEnabled = false;
+    clearTimeout(autoTimer);
+    autoTimer = null;
+    updateAutoButton();
+    showToast('自动保存已关闭');
+  }
+
+  function autoSchedule(delay = 500) {
+    if (!autoSaveEnabled) return;
+    clearTimeout(autoTimer);
+    autoTimer = setTimeout(autoSaveTick, delay);
+  }
+
+  async function autoSaveTick() {
+    autoTimer = null;
+    if (!autoSaveEnabled || autoTickRunning) return;
+    if (saving || capturing) {
+      autoSchedule(600);
+      return;
+    }
+    autoTickRunning = true;
+    const epoch = canvasClearCount;
+    try {
+      const layout = getLayoutSignature();
+      if (lastLayoutId && layout.id !== lastLayoutId) {
+        pauseAutoForLayout(layout);
+        return;
+      }
+      await waitForCanvasStable(1600);
+      if (!autoSaveEnabled) return;
+      const saved = await saveCurrentPage(true);
+      if (!saved) {
+        if (autoSaveEnabled && canvasClearCount !== epoch) autoSchedule(800);
+        return;
+      }
+      const from = autoLastPageIdentity;
+      const to = saved.identity;
+      if (from && to && from !== to) {
+        const now = performance.now();
+        const dir = autoDirection && now - autoDirectionAt < 5000 ? autoDirection : 0;
+        try {
+          await saveEdgeToDB({
+            key: `${from}->${to}`,
+            from,
+            to,
+            dir,
+            layoutId: saved.layoutId || '',
+            time: new Date().toISOString(),
+          });
+        } catch (e) {
+          console.warn('[weread-scan] 翻页边保存失败', e);
+        }
+      }
+      autoLastPageIdentity = to;
+      if (canvasClearCount === epoch) {
+        autoDirection = 0;
+        autoDirectionAt = 0;
+      } else if (autoSaveEnabled) {
+        autoSchedule(800);
+      }
+    } finally {
+      autoTickRunning = false;
+    }
+  }
+
+  function noteAutoDirection(dir) {
+    if (!autoSaveEnabled) return;
+    autoDirection = dir;
+    autoDirectionAt = performance.now();
+  }
+
+  window.addEventListener('keydown', event => {
+    if (!autoSaveEnabled) return;
+    const target = event.target;
+    if (target?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target?.tagName || '')) return;
+    if (event.key === 'ArrowRight' || event.key === 'PageDown' || event.key === ' ') {
+      noteAutoDirection(1);
+    } else if (event.key === 'ArrowLeft' || event.key === 'PageUp') {
+      noteAutoDirection(-1);
+    }
+  }, true);
+
+  document.addEventListener('click', event => {
+    if (!autoSaveEnabled) return;
+    let el = event.target;
+    for (let i = 0; el && i < 5; i++, el = el.parentElement) {
+      const text = (el.innerText || '').trim();
+      const aria = el.getAttribute?.('aria-label') || '';
+      const cls = String(el.className || '');
+      if (/^(下一页|下页)$/.test(text) || /下一页|下页/.test(aria)
+          || /(^|[-_])next([-_]|$)/i.test(cls)) {
+        noteAutoDirection(1);
+        return;
+      }
+      if (/^(上一页|上页)$/.test(text) || /上一页|上页/.test(aria)
+          || /(^|[-_])prev(ious)?([-_]|$)/i.test(cls)) {
+        noteAutoDirection(-1);
+        return;
+      }
+    }
+  }, true);
+
+  setInterval(() => {
+    if (!autoSaveEnabled) return;
+    if (saving || capturing) return;
+    if (canvasClearCount !== autoLastClear) {
+      autoLastClear = canvasClearCount;
+      autoSchedule(500);
+    }
+  }, 250);
 
   let fontObserver = null;
   let fontPatchTimer = null;
@@ -761,13 +960,18 @@
   function buildFallbackCss() {
     const main = buildMainStack();
     if (!main) return '';
-    const code = buildCodeStack();
+    const keepCode = !!fontSettings.codeKeepOriginal;
+    const code = keepCode ? '' : buildCodeStack();
+    const codeExclude = keepCode
+      ? ':not(pre):not(code):not(kbd):not(samp):not([class*="code"]):not([class*="Code"]):not([class*="mono"]):not([class*="Mono"]):not(pre *):not(code *):not([class*="code"] *):not([class*="Code"] *):not([class*="mono"] *):not([class*="Mono"] *)'
+      : '';
     const scope = '[data-weread-font-root]';
     return `
-    ${scope}, ${scope} *:not(script):not(style):not(noscript):not(template):not(svg):not(button):not(input):not(textarea):not(select):not([role="button"]):not([class*="icon"]):not([class*="Icon"]) {
+    ${scope}, ${scope} *:not(script):not(style):not(noscript):not(template):not(svg):not(button):not(input):not(textarea):not(select):not([role="button"]):not([class*="icon"]):not([class*="Icon"])${codeExclude} {
       font-family: ${main} !important;
     }
-    ${code ? `${scope} code, ${scope} pre, ${scope} kbd, ${scope} samp { font-family: ${code} !important; }` : ''}`;
+    ${code ? `${scope} code, ${scope} pre, ${scope} kbd, ${scope} samp { font-family: ${code} !important; }` : ''}
+    ${keepCode ? `${scope} pre *, ${scope} code *, ${scope} [class*="code"] *, ${scope} [class*="Code"] *, ${scope} [class*="mono"] *, ${scope} [class*="Mono"] * { font-family: inherit !important; }` : ''}`;
   }
 
   function getFontStyle(doc = document) {
@@ -951,6 +1155,7 @@
   function patchFontElement(el) {
     if (!el || el.nodeType !== 1 || !el.style) return;
     if (el.closest?.('script, style, noscript, template, button, [role="button"], input, textarea, select, svg, [class*="icon"]')) return;
+    if (fontSettings.codeKeepOriginal && el.closest?.(CODE_SELECTOR)) return;
     const role = roleForElement(el);
     if (el.getAttribute(PATCH_ATTR) === role) return;
 
@@ -1117,6 +1322,7 @@
           font-size:12px;background:#fff;color:#333;
         }
         button.danger { background:#e8e6e3; }
+        button.active { background:#e8f5e9;color:#1b5e20;font-weight:600; }
         .panel.flash { box-shadow:0 0 0 3px rgba(46,125,50,.5), 0 4px 16px rgba(0,0,0,.12); }
         .status { color:#666;font-size:11px;margin-bottom:6px;text-align:center; }
         .layout { color:#999;font-size:10px;margin:-2px 0 6px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
@@ -1143,6 +1349,7 @@
           <div class="status" id="scan-status">0 页</div>
           <div class="layout" id="layout-info"></div>
           <button id="btnSave">保存</button>
+          <button id="btnAuto">自动保存：关</button>
           <button id="btnCurrent">下载当前</button>
           <button id="btnZip">下载全部</button>
           <button id="btnFont">字体</button>
@@ -1170,6 +1377,9 @@
         <div class="row">
           <div class="switch"><span>Mono</span><input type="checkbox" id="mono-en"></div>
           <select id="mono-font"></select>
+        </div>
+        <div class="row">
+          <div class="switch"><span>代码块原字体</span><input type="checkbox" id="code-orig"></div>
         </div>
         <div class="force-row">
           <div style="margin-bottom:4px;font-size:12px;">字体应用策略</div>
@@ -1253,6 +1463,24 @@
     bindCheck('mono-en', 'mono');
     bindSelect('mono-font', 'mono');
 
+    const codeOrigEl = shadow.getElementById('code-orig');
+    const syncCodeOrigin = () => {
+      const keep = !!fontSettings.codeKeepOriginal;
+      codeOrigEl.checked = keep;
+      shadow.getElementById('mono-en').disabled = keep;
+      shadow.getElementById('mono-font').disabled = keep;
+    };
+    codeOrigEl.onchange = () => {
+      fontSettings.codeKeepOriginal = codeOrigEl.checked;
+      syncCodeOrigin();
+      updateStrategyHint();
+      saveFontSettings();
+      if (!codeOrigEl.checked) {
+        showToast('代码块字体可能影响换行，请检查排版', false, true);
+      }
+    };
+    syncCodeOrigin();
+
     const enModeEl = shadow.getElementById('en-mode');
     const forceEl = shadow.getElementById('force-en');
     const hintEl = shadow.getElementById('strategy-hint');
@@ -1267,6 +1495,7 @@
         const label = { sans: 'Sans', serif: 'Serif', mono: 'Mono' }[fontSettings.forceEn] || 'Serif';
         hintEl.textContent = `中文仍用面板字体；英文（含代码）统一 ${label}。`;
       }
+      if (fontSettings.codeKeepOriginal) hintEl.textContent += ' 代码块保持原字体。';
     };
     const updateForceVisibility = () => {
       forceEl.style.display = fontSettings.enMode === 'force' ? '' : 'none';
@@ -1287,12 +1516,18 @@
 
     // 扫描按钮
     shadow.getElementById('btnSave').onclick = saveCurrentPage;
+    shadow.getElementById('btnAuto').onclick = () => setAutoSave(!autoSaveEnabled);
     shadow.getElementById('btnCurrent').onclick = downloadCurrentPage;
     shadow.getElementById('btnZip').onclick = downloadAllImages;
     shadow.getElementById('btnClear').onclick = async () => {
       if (!db) return alert('截图存储尚未就绪');
+      if (saving) return alert('正在保存，请稍后再清空');
       if (confirm('清空所有已保存页面？')) {
         try {
+          autoSaveEnabled = false;
+          clearTimeout(autoTimer);
+          autoTimer = null;
+          updateAutoButton();
           pages = [];
           lastLayoutId = '';
           await clearDB();
@@ -1401,6 +1636,7 @@
 
   async function init() {
     createPanel();
+    updateAutoButton();
     updateScanStatus();
     applyFonts();
     try {
