@@ -7,7 +7,7 @@
 | 脚本 | 版本 | 说明 |
 |------|------|------|
 | [cjk-mono.user.js](./cjk-mono.user.js) | 3.10.11 | 全站汉字/假名与等宽代码字体替换 |
-| [weread-scan-fonts.user.js](./weread-scan-fonts.user.js) | 1.12 | 微信读书正文截图 + 中英字体分离 |
+| [weread-scan-fonts.user.js](./weread-scan-fonts.user.js) | 1.13 | 微信读书正文截图 + 中英字体分离 + 版面锁 |
 
 ---
 
@@ -133,6 +133,7 @@
 - **Canvas 正文中文接管**：hook `CanvasRenderingContext2D.prototype.fillText`，把正文的 `wr_default_font` 临时换为面板中文 face；只换纯中文/中文标点，英文保持原样，避免字宽变化导致错位
 - **Canvas 页指纹**：用 `fillText` 抓到的文本做页指纹，替代 48×48 图像指纹；Canvas 书不再只能存两页，同一页重复保存会更新
 - **翻页稳定检测**：保存前等 canvas 文本稳定，避免翻页瞬间截到半页
+- **版面锁**：保存时记录窗口/屏幕/DPR/阅读模式/画布尺寸/正文字号行高/面板字体/主题；版面变化时提示，并把截图保存为新分段
 - **中英分离**：`@font-face` + `unicode-range` 拆分拉丁与汉字，不依赖站点是否给 `sans` / `serif` / `mono` 打标记
 - **动态内容**：MutationObserver 监听切章、追加段落
 - **不碰图标 / UI**：补丁和兜底都收进阅读区根（含同源 iframe 与 open shadow root），只跳过按钮、输入框、SVG 和图标；observer 只监听 `childList`
@@ -167,7 +168,7 @@
 | 字体 | 展开字体设置 |
 | 清空 | 清空 IndexedDB 中的截图 |
 
-保存时状态栏显示“截图中…”，面板边框闪烁，底部提示“已保存第 N 页 / 已更新第 N 页”。截图倍率最低 2×，大屏下文字保持清晰。
+保存时状态栏显示“截图中…”，面板边框闪烁，底部提示“已保存第 N 页 / 已更新第 N 页”。截图倍率最低 2×，大屏下文字保持清晰。面板会显示当前版面（如 `1200×900 @1x`）；窗口、缩放、字体、字号、主题等变化时提示“版面已变”，并保存为新分段。
 
 配置存储：截图在 IndexedDB `weread_scan_db` / `pages`；字体在 `localStorage` 的 `weread_font_settings`。
 
@@ -191,6 +192,8 @@
 - Canvas 正文的字体由站点绘制；1.12 起用 Canvas hook 接管中文。若正文族不是 `wr_default_font`，控制台执行 `__wereadScanDebug.canvasFonts()` 查看实际值，再调整脚本里的 `CANVAS_FAMILY`。
 - Canvas 英文字体暂不替换，避免字宽变化导致错位；需要时先按原字体 `measureText` 定位，再逐字替换。
 - 首次安装时 `@require` 需要先下载 html2canvas；如果第一页没换字体，翻一页或刷新即可。
+- 版面变化后旧页和新页会作为两个分段保存；当前“下载全部”仍按保存顺序导出，后续可按 `layoutId` 分组导出。
+- 版面锁是“提示 + 新分段”，不会硬拦截保存；切回原版面再保存，会更新原分段的同页。
 - 规则设定的标题只认 `h1`–`h6` / `[role="heading"]`；标题是普通 `div` 时请用“强制设定”。
 - 书籍设定靠类名和字体栈识别 face，复杂书籍可能识别不到，此时回退到规则设定。
 
@@ -198,6 +201,7 @@
 
 | 版本 | 变更 |
 |------|------|
+| 1.13 | 加版面锁：记录窗口/缩放/画布/正文字号行高/面板字体/主题；版面变化提示并按新分段保存，页记录带 `layoutId` |
 | 1.12 | 加 Canvas 中文 hook、`fillText` 文本指纹、翻页稳定检测；`@run-at` 改 `document-start`，修复 Canvas 书字体和页识别 |
 | 1.11 | 同一页识别加入 iframe 正文与 48×48 图像指纹，修复 canvas/iframe 书只能保存两页 |
 | 1.10 | 恢复初始版本的截图目标选择；主目标生成空图时自动回退 canvas 父级 / body，修复“截图数据无效” |

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微信读书扫描 + 字体
 // @namespace    https://weread.qq.com/
-// @version      1.12
+// @version      1.13
 // @description  正文截图 + 可呼出的字体设置
 // @author       Grok
 // @match        https://weread.qq.com/web/reader/*
@@ -87,6 +87,7 @@
 
   let db = null;
   let pages = [];
+  let lastLayoutId = '';
   let host = null;
   let shadow = null;
   let fontSettings = loadFontSettings();
@@ -103,17 +104,105 @@
   const canvasTextByCanvas = new WeakMap();
   const canvasFontCache = new Map();
   const canvasFontCounts = new Map();
+  const canvasRecentFonts = [];
   let canvasClearCount = 0;
   let canvasRewriteCount = 0;
+  let lastCanvasBodyFont = '';
 
   function isCanvasTarget(canvas) {
     return !!canvas && canvas.isConnected && canvas.width > 200 && canvas.height > 200;
   }
 
+  function getReaderCanvases() {
+    const all = [...document.querySelectorAll('canvas')].filter(isCanvasTarget);
+    const reader = all.filter(canvas => {
+      const style = canvas.getAttribute('style') || '';
+      return style.includes('pointer-events: none') || /position\s*:\s*absolute/i.test(style);
+    });
+    return reader.length ? reader : all;
+  }
+
+  function normalizeCanvasFont(font) {
+    const m = String(font || '').match(/(\d+(?:\.\d+)?px)(?:\s*\/\s*([\d.]+px))?\s+(.+)$/);
+    return m ? `${m[1]}${m[2] ? ` /${m[2]}` : ''} ${m[3]}`.trim() : String(font || '');
+  }
+
+  function canvasBodyFont() {
+    const counts = new Map();
+    for (const raw of canvasRecentFonts) {
+      const font = normalizeCanvasFont(raw);
+      const size = parseFloat((font.match(/(\d+(?:\.\d+)?)px/) || [])[1] || 0);
+      if (size < 14 || size > 26) continue;
+      counts.set(font, (counts.get(font) || 0) + 1);
+    }
+    let best = '';
+    let bestCount = 0;
+    for (const [font, count] of counts) {
+      if (count > bestCount) {
+        best = font;
+        bestCount = count;
+      }
+    }
+    if (best) lastCanvasBodyFont = best;
+    return lastCanvasBodyFont;
+  }
+
+  function getLayoutSignature() {
+    const canvases = getReaderCanvases();
+    const firstCanvas = canvases[0];
+    const body = document.body;
+    const bodyStyle = body ? getComputedStyle(body) : null;
+    const root = document.documentElement;
+    let readerBg = '';
+    let readerColor = '';
+    let readerLineHeight = '';
+    try {
+      const reader = getReaderContainer();
+      if (reader) {
+        const style = getComputedStyle(reader);
+        readerBg = style.backgroundColor || '';
+        readerColor = style.color || '';
+        readerLineHeight = style.lineHeight || '';
+      }
+    } catch (e) {}
+    const themeClasses = `${root?.className || ''} ${body?.className || ''}`
+      .split(/\s+/)
+      .filter(name => /theme|dark|light/i.test(name))
+      .sort()
+      .join(' ');
+    const fonts = ['zh', 'sans', 'serif', 'mono']
+      .map(key => `${key}=${fontSettings[key]?.enabled ? 1 : 0}:${fontSettings[key]?.font || ''}`)
+      .join(';') + `;mode=${fontSettings.enMode};force=${fontSettings.forceEn}`;
+    const bodyFont = canvasBodyFont();
+    const metric = bodyFont.match(/^(\d+(?:\.\d+)?)px(?:\s*\/\s*([\d.]+)px)?/);
+    const mode = canvases.length >= 2 ? 'page' : 'single';
+    const raw = {
+      w: window.innerWidth,
+      h: window.innerHeight,
+      dpr: Math.round((window.devicePixelRatio || 1) * 100) / 100,
+      vv: Math.round((window.visualViewport?.scale || 1) * 100) / 100,
+      sw: screen.width,
+      sh: screen.height,
+      cw: Math.round(firstCanvas?.width || 0),
+      ch: mode === 'page' ? Math.round(firstCanvas?.height || 0) : 0,
+      canvases: canvases.length,
+      mode,
+      fontSize: metric ? metric[1] : '',
+      lineHeight: metric?.[2] || readerLineHeight || '',
+      readerLineHeight,
+      fonts,
+      bg: bodyStyle?.backgroundColor || '',
+      fg: bodyStyle?.color || '',
+      readerBg,
+      readerFg: readerColor,
+      theme: themeClasses || root?.getAttribute('data-theme') || '',
+    };
+    return { id: hashString(JSON.stringify(raw)), ...raw, bodyFont };
+  }
+
   function canvasTextCount() {
     let n = 0;
-    document.querySelectorAll('canvas').forEach(canvas => {
-      if (!isCanvasTarget(canvas)) return;
+    getReaderCanvases().forEach(canvas => {
       const buf = canvasTextByCanvas.get(canvas);
       if (buf) n += buf.join('').length;
     });
@@ -123,8 +212,7 @@
   function canvasTextSignature() {
     if (!canvasClearCount) return '';
     const parts = [];
-    document.querySelectorAll('canvas').forEach(canvas => {
-      if (!isCanvasTarget(canvas)) return;
+    getReaderCanvases().forEach(canvas => {
       const buf = canvasTextByCanvas.get(canvas);
       if (buf && buf.length) parts.push(buf.join(''));
     });
@@ -176,7 +264,11 @@
           if (buf.length > 8000) buf.splice(0, buf.length - 8000);
         }
         const f = this.font;
-        if (f) canvasFontCounts.set(f, (canvasFontCounts.get(f) || 0) + 1);
+        if (f) {
+          canvasFontCounts.set(f, (canvasFontCounts.get(f) || 0) + 1);
+          canvasRecentFonts.push(f);
+          if (canvasRecentFonts.length > 400) canvasRecentFonts.shift();
+        }
       }
 
       const zh = fontSettings.zh;
@@ -231,6 +323,8 @@
     canvasChars: canvasTextCount,
     canvasClears: () => canvasClearCount,
     canvasRewrites: () => canvasRewriteCount,
+    canvasBodyFont,
+    layout: getLayoutSignature,
   };
 
   function loadFontSettings() {
@@ -497,13 +591,14 @@
 
   let toastTimer = null;
 
-  function showToast(text, isError = false) {
+  function showToast(text, isError = false, isWarn = false) {
     if (!shadow) return;
     const toast = shadow.getElementById('scan-toast');
     const panel = shadow.querySelector('.panel');
     if (toast) {
       toast.textContent = text;
       toast.classList.toggle('error', !!isError);
+      toast.classList.toggle('warn', !!isWarn);
       toast.classList.add('show');
       clearTimeout(toastTimer);
       toastTimer = setTimeout(() => toast.classList.remove('show'), 2200);
@@ -530,33 +625,75 @@
     let page = null;
     let previousData = null;
     let previousTime = null;
+    let previousLayoutId = '';
+    let previousLayout = null;
+    let layoutChanged = false;
     try {
       await new Promise(resolve => requestAnimationFrame(() => resolve()));
       // 等 canvas 画完再截，避免翻页瞬间截到半页。
       await waitForCanvasStable();
+      const layout = getLayoutSignature();
+      layoutChanged = pages.length > 0 && !!lastLayoutId && lastLayoutId !== layout.id;
+      const layoutInfo = {
+        w: layout.w,
+        h: layout.h,
+        dpr: layout.dpr,
+        cw: layout.cw,
+        ch: layout.ch,
+        mode: layout.mode,
+        fontSize: layout.fontSize,
+        lineHeight: layout.lineHeight,
+        bodyFont: layout.bodyFont,
+        fonts: layout.fonts,
+        theme: layout.theme,
+      };
       const captured = await captureToDataURL();
       const dataURL = captured.dataURL;
       const identity = getPageIdentity(captured.target, captured.visual);
-      page = pages.find(p => p.identity === identity) || null;
+      // 同页 + 同版面才更新；旧版本没有 layoutId 的页做一次迁移。
+      page = pages.find(p => p.identity === identity && p.layoutId === layout.id)
+        || pages.find(p => p.identity === identity && !p.layoutId)
+        || null;
       if (page) {
         previousData = page.dataURL;
         previousTime = page.time;
+        previousLayoutId = page.layoutId || '';
+        previousLayout = page.layout || null;
         page.dataURL = dataURL;
         page.time = new Date().toISOString();
+        page.layoutId = layout.id;
+        page.layout = layoutInfo;
       } else {
         const nextIndex = pages.reduce((max, p) => Math.max(max, Number(p.index) || 0), 0) + 1;
-        page = { index: nextIndex, identity, dataURL, time: new Date().toISOString() };
+        page = {
+          index: nextIndex,
+          identity,
+          dataURL,
+          time: new Date().toISOString(),
+          layoutId: layout.id,
+          layout: layoutInfo,
+        };
         pages.push(page);
       }
       await savePageToDB(page);
+      lastLayoutId = layout.id;
       updateScanStatus();
-      showToast(previousData != null ? `已更新第 ${page.index} 页` : `已保存第 ${page.index} 页`);
+      updateLayoutInfo(layout, layoutChanged);
+      const verb = previousData != null ? '更新' : '保存';
+      showToast(
+        layoutChanged ? `版面已变，已${verb}第 ${page.index} 页` :
+          previousData != null ? `已更新第 ${page.index} 页` : `已保存第 ${page.index} 页`,
+        false,
+        layoutChanged,
+      );
     } catch (e) {
       console.error('保存失败', e);
       if (page) {
         if (previousData != null) {
           page.dataURL = previousData;
           page.time = previousTime;
+          page.layoutId = previousLayoutId;
+          page.layout = previousLayout;
         } else {
           const idx = pages.indexOf(page);
           if (idx >= 0) pages.splice(idx, 1);
@@ -982,9 +1119,12 @@
         button.danger { background:#e8e6e3; }
         .panel.flash { box-shadow:0 0 0 3px rgba(46,125,50,.5), 0 4px 16px rgba(0,0,0,.12); }
         .status { color:#666;font-size:11px;margin-bottom:6px;text-align:center; }
+        .layout { color:#999;font-size:10px;margin:-2px 0 6px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
+        .layout.warn { color:#b26a00; }
         .toast { min-height:14px;margin-top:4px;font-size:11px;color:#2e7d32;text-align:center;opacity:0;transition:opacity .18s; }
         .toast.show { opacity:1; }
         .toast.error { color:#c62828; }
+        .toast.warn { color:#b26a00; }
         .font-panel {
           display:none;position:absolute;top:0;right:130px;width:220px;
           background:#f7f6f3;border-radius:10px;box-shadow:0 4px 16px rgba(0,0,0,.12);padding:10px;
@@ -1001,6 +1141,7 @@
         <div class="header" id="scan-header">扫描</div>
         <div class="body">
           <div class="status" id="scan-status">0 页</div>
+          <div class="layout" id="layout-info"></div>
           <button id="btnSave">保存</button>
           <button id="btnCurrent">下载当前</button>
           <button id="btnZip">下载全部</button>
@@ -1153,8 +1294,10 @@
       if (confirm('清空所有已保存页面？')) {
         try {
           pages = [];
+          lastLayoutId = '';
           await clearDB();
           updateScanStatus();
+          updateLayoutInfo();
         } catch (e) {
           console.error('清空失败', e);
           alert('清空失败：' + (e.message || e));
@@ -1166,6 +1309,30 @@
   function updateScanStatus(text) {
     const el = shadow?.getElementById('scan-status');
     if (el) el.textContent = text || `${pages.length} 页`;
+  }
+
+  function updateLayoutInfo(layout = null, changed = false) {
+    const el = shadow?.getElementById('layout-info');
+    if (!el) return;
+    if (!layout) {
+      try {
+        layout = getLayoutSignature();
+      } catch (e) {
+        return;
+      }
+    }
+    const label = `${layout.w}×${layout.h} @${layout.dpr}x`;
+    el.textContent = changed ? `⚠ ${label}` : label;
+    el.title = [
+      `版面 ${layout.id}`,
+      `画布 ${layout.cw}${layout.ch ? `×${layout.ch}` : ''}`,
+      `正文 ${layout.bodyFont || '未识别'}`,
+      `字号 ${layout.fontSize || '?'}${layout.lineHeight ? ` / ${layout.lineHeight}` : ''}`,
+      `模式 ${layout.mode}`,
+      `主题 ${layout.theme || layout.bg || '默认'}`,
+      changed ? '与上次保存的版面不同，已按新分段保存' : '',
+    ].filter(Boolean).join('\n');
+    el.classList.toggle('warn', !!changed);
   }
 
   function pad4(n) { return String(n).padStart(4, '0'); }
@@ -1239,7 +1406,9 @@
     try {
       db = await openDB();
       pages = await loadAllPages();
+      lastLayoutId = pages.length ? (pages[pages.length - 1].layoutId || '') : '';
       updateScanStatus();
+      updateLayoutInfo();
     } catch (e) {
       console.error('截图存储不可用', e);
       updateScanStatus('存储不可用');
