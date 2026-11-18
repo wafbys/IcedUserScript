@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微信读书扫描 + 字体
 // @namespace    https://weread.qq.com/
-// @version      1.15
+// @version      1.16
 // @description  正文截图 + 可呼出的字体设置
 // @author       Grok
 // @match        https://weread.qq.com/web/reader/*
@@ -335,6 +335,21 @@
     canvasRewrites: () => canvasRewriteCount,
     canvasBodyFont,
     layout: getLayoutSignature,
+    orderedGroups: async () => {
+      let edges = [];
+      try {
+        edges = await loadAllEdges();
+      } catch (e) {}
+      return buildOrderedGroups(edges).map(group => ({
+        key: group.key,
+        firstIndex: group.firstIndex,
+        pages: group.pages.map(page => ({
+          index: page.index,
+          identity: page.identity,
+          layoutId: page.layoutId || '',
+        })),
+      }));
+    },
     auto: () => ({
       enabled: autoSaveEnabled,
       lastClear: autoLastClear,
@@ -456,6 +471,27 @@
       tx.onabort = () => {
         clearTimeout(timer);
         reject(tx.error || new Error('IndexedDB 读取中止'));
+      };
+    });
+  }
+
+  async function loadAllEdges() {
+    if (!db) return [];
+    const tx = db.transaction(EDGE_STORE, 'readonly');
+    const req = tx.objectStore(EDGE_STORE).getAll();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('IndexedDB 读取边超时')), 15000);
+      req.onsuccess = () => {
+        clearTimeout(timer);
+        resolve(req.result || []);
+      };
+      req.onerror = () => {
+        clearTimeout(timer);
+        reject(req.error || new Error('IndexedDB 读取边失败'));
+      };
+      tx.onabort = () => {
+        clearTimeout(timer);
+        reject(tx.error || new Error('IndexedDB 读取边中止'));
       };
     });
   }
@@ -1352,6 +1388,7 @@
           <button id="btnAuto">自动保存：关</button>
           <button id="btnCurrent">下载当前</button>
           <button id="btnZip">下载全部</button>
+          <button id="btnOrdered">按序导出</button>
           <button id="btnFont">字体</button>
           <button class="danger" id="btnClear">清空</button>
           <div class="toast" id="scan-toast"></div>
@@ -1519,6 +1556,7 @@
     shadow.getElementById('btnAuto').onclick = () => setAutoSave(!autoSaveEnabled);
     shadow.getElementById('btnCurrent').onclick = downloadCurrentPage;
     shadow.getElementById('btnZip').onclick = downloadAllImages;
+    shadow.getElementById('btnOrdered').onclick = downloadOrderedImages;
     shadow.getElementById('btnClear').onclick = async () => {
       if (!db) return alert('截图存储尚未就绪');
       if (saving) return alert('正在保存，请稍后再清空');
@@ -1602,6 +1640,113 @@
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 10000);
+  }
+
+  function buildOrderedGroups(edges = []) {
+    const groups = new Map();
+    for (const page of pages) {
+      const key = page.layoutId || 'legacy';
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(page);
+    }
+
+    const result = [];
+    for (const [key, list] of groups) {
+      const idOf = page => page.identity || `idx-${page.index}`;
+      const byId = new Map(list.map(page => [idOf(page), page]));
+      const adjacency = new Map();
+      const indegree = new Map();
+      list.forEach(page => {
+        adjacency.set(idOf(page), new Set());
+        indegree.set(idOf(page), 0);
+      });
+
+      for (const edge of edges || []) {
+        if (!edge || !edge.from || !edge.to || edge.from === edge.to) continue;
+        if (edge.layoutId && edge.layoutId !== key) continue;
+        const dir = Number(edge.dir) || 0;
+        let from;
+        let to;
+        if (dir === 1) {
+          from = edge.from;
+          to = edge.to;
+        } else if (dir === -1) {
+          from = edge.to;
+          to = edge.from;
+        } else {
+          continue;
+        }
+        if (!byId.has(from) || !byId.has(to)) continue;
+        if (!adjacency.get(from).has(to)) {
+          adjacency.get(from).add(to);
+          indegree.set(to, (indegree.get(to) || 0) + 1);
+        }
+      }
+
+      const byIndex = (a, b) => (Number(a.index) || 0) - (Number(b.index) || 0);
+      const ready = list.filter(page => indegree.get(idOf(page)) === 0).sort(byIndex);
+      const ordered = [];
+      while (ready.length) {
+        const page = ready.shift();
+        ordered.push(page);
+        for (const nextId of adjacency.get(idOf(page))) {
+          indegree.set(nextId, indegree.get(nextId) - 1);
+          if (indegree.get(nextId) === 0) {
+            const next = byId.get(nextId);
+            let pos = 0;
+            while (pos < ready.length && byIndex(ready[pos], next) <= 0) pos++;
+            ready.splice(pos, 0, next);
+          }
+        }
+      }
+      if (ordered.length < list.length) {
+        console.warn('[weread-scan] 翻页边存在冲突，剩余页按保存顺序补上');
+        const seen = new Set(ordered.map(page => idOf(page)));
+        ordered.push(...list.filter(page => !seen.has(idOf(page))).sort(byIndex));
+      }
+      result.push({
+        key,
+        firstIndex: list.reduce((min, page) => Math.min(min, Number(page.index) || 0), Infinity),
+        pages: ordered,
+      });
+    }
+    result.sort((a, b) => a.firstIndex - b.firstIndex);
+    return result;
+  }
+
+  async function downloadOrderedImages() {
+    if (!pages.length) return alert('还没有截图');
+    let edges = [];
+    try {
+      edges = await loadAllEdges();
+    } catch (e) {
+      console.warn('[weread-scan] 读取翻页边失败，按保存顺序导出', e);
+    }
+    const groups = buildOrderedGroups(edges);
+    const total = groups.reduce((sum, group) => sum + group.pages.length, 0);
+    if (!total) return alert('还没有截图');
+    showToast(`按序导出 ${total} 张 / ${groups.length} 个版面…`);
+    let ok = 0;
+    let failed = 0;
+    for (const group of groups) {
+      const safeKey = String(group.key || 'legacy').replace(/[^\w.-]+/g, '_');
+      const prefix = groups.length > 1 ? `page_${safeKey}_` : 'page_';
+      for (let i = 0; i < group.pages.length; i++) {
+        const page = group.pages[i];
+        try {
+          triggerBlobDownload(dataURLToBlob(page.dataURL), `${prefix}${pad4(i + 1)}.png`);
+          ok += 1;
+        } catch (e) {
+          failed += 1;
+          console.error(`按序导出第 ${i + 1} 页失败`, e);
+        }
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
+    }
+    showToast(
+      failed ? `按序导出 ${ok} 张，${failed} 张失败` : `按序导出 ${ok} 张（${groups.length} 个版面）`,
+      !!failed,
+    );
   }
 
   function downloadCurrentPage() {
